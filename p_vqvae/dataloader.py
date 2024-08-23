@@ -6,20 +6,21 @@ from monai.data import DataLoader
 from tqdm import tqdm
 
 
-def transform(data: np.array, downsample_factor=1, normalize=True, crop_size=4, padding=True) -> np.array:
+def transform(data: np.array, downsample_factor: int = 1, normalize: bool = True,
+              crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
+              padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None) -> np.array:
     """
-  Transforms a 3D MRI image using the specified parameters.
-  """
-    if padding:
-        data = np.pad(data, ((1, 2), (0, 0), (5, 6)), mode='constant')
+    Transforms a 3D MRI image using the specified parameters.
+    """
+    if crop:  # crop image
+        data = data[crop[0][0]:-crop[0][1], crop[1][0]:-crop[1][1], crop[2][0]:-crop[2][1]]
     if downsample_factor != 1:
         f = downsample_factor
         data = data[::f, ::f, ::f]  # downsample image, take every f-th element
     if normalize:
         data = (data - data.min()) / (data.max() - data.min())
-    if crop_size != 0:  # crop image
-        assert crop_size >= 0
-        data = data[crop_size:-crop_size, crop_size:-crop_size - 1, crop_size:-crop_size]
+    if padding:
+        data = np.pad(data, padding, mode='constant')
     return data
 
 
@@ -37,14 +38,14 @@ class DataSet:
             mode: str = "full",
             downsample: int = 1,
             normalize: bool = True,
-            crop_size: int = 4,
-            padding: bool = True
+            crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
+            padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None
     ):
         self.mode = mode
         self.downsample = downsample
         self.prefix = f"_{mode}_smpl{downsample}"
         self.normalize = normalize
-        self.crop_size = crop_size
+        self.crop_size = crop
         self.padding = padding
 
     def collect_paths(
