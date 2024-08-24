@@ -60,7 +60,14 @@ class DataSet:
         :returns
             list of image paths
         """
-        n = 32 if self.mode == "tiny" else 10000  # number of images to load
+        # number of images to load:
+        if self.mode == "tiny":
+            n = 32
+        elif self.mode == "small":
+            n = 64
+        else:
+            n = 10000
+
         k = 0  # image counter
         img_paths = []
 
@@ -91,16 +98,21 @@ class DataSet:
         else:
             paths = self.collect_paths(parent_path)
             progress_bar = tqdm(total=len(paths), ncols=110, desc="Loading T1 images")  # initialise progress bar
-            data = []
+
+            # load first image to define shape
+            img = nib.load(paths[0], mmap=True)  # Use memory mapping
+            img = img.get_fdata()  # This will not load the entire file into memory
+            img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
+            shape = (len(paths), 1, img.shape[0], img.shape[1], img.shape[2])
+            data = np.empty(shape, dtype=np.float16)
 
             # Load images using memory mapping
-            for img_path in paths:
+            for k, img_path in enumerate(paths):
                 img = nib.load(img_path, mmap=True)  # Use memory mapping
-                img_data = img.get_fdata()  # This will not load the entire file into memory
-                img_data = transform(img_data, self.downsample, self.normalize, self.crop_size, self.padding)
-                data.append(img_data)
+                img = img.get_fdata().astype(np.float16)  # This will not load the entire file into memory
+                img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
+                data[k, 0, :, :, :] = img[:, :, :]
                 progress_bar.update(1)
-            data = np.stack(data)
 
             progress_bar.close()
 
