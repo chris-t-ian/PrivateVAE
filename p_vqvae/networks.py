@@ -1,6 +1,7 @@
 import os
 import torch
 import time
+import numpy as np
 from tqdm import tqdm
 from torch.nn import L1Loss, CrossEntropyLoss
 from monai.networks.nets import VQVAE
@@ -254,7 +255,7 @@ class TransformerDecoder_VQVAE:
             attn_layers_depth=self.attn_layers_depth,
             attn_layers_heads=self.attn_layers_heads,
         )
-        model = model.to(self.device)
+        model = model.to(self.device, dtype=self.dtype)
         return model
 
     def train(self):
@@ -321,4 +322,63 @@ class TransformerDecoder_VQVAE:
 
         val_loss /= val_step
         self.val_ce_epoch_loss_list.append(val_loss)
+
+    def create_synthetic_images(self, num_images=10):
+        self.vqvae_model.eval()
+        self.model.eval()
+        generated_images = []
+
+        with torch.no_grad():
+            for i in range(num_images):
+                sample = self.inferer.sample(
+                    vqvae_model=self.vqvae_model,
+                    transformer_model=self.model,
+                    ordering=self.ordering,
+                    latent_spatial_dim=self.vqvae_model.encode_stage_2_inputs(next(iter(self.train_loader))).shape[2:],
+                    starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
+                )
+                generated_image = sample[0, 0].cpu().numpy()
+                generated_images.append(generated_image)
+
+        return np.stack(generated_images)
+
+    def save(self, model_path, **kwargs):
+        """
+        Saves the model weights with a filename that includes hyperparameters.
+
+        Args:
+            model_path: The base directory where the model will be saved.
+            **kwargs: Additional keyword arguments representing hyperparameters.
+        """
+        filename = "VQVAE"
+        for key, value in kwargs.items():
+            filename += f"_{key}{value}"
+        filename += ".pth"
+        full_path = os.path.join(model_path, filename)
+        if not os.path.exists(model_path):
+            os.makedirs(model_path)
+        torch.save(self.model.state_dict(), full_path)
+        print(f"Model saved to {full_path}")
+
+    def load(self, model_path, **kwargs):
+        """
+        Loads the model weights based on hyperparameters.
+
+        Args:
+            model: The PyTorch model to load weights into.
+            model_path: The base directory where the model is saved.
+            **kwargs: Keyword arguments representing hyperparameters.
+        """
+        filename = "VQVAE"
+        for key, value in kwargs.items():
+            filename += f"_{key}{value}"
+        filename += ".pth"
+        full_path = os.path.join(model_path, filename)
+        if os.path.exists(full_path):
+            state_dict = torch.load(full_path)
+            self.model.load_state_dict(state_dict)
+            print(f"Model loaded from {full_path}")
+        else:
+            print(f"Model file not found: {full_path}")
+
 
