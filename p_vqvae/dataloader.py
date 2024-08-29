@@ -36,6 +36,8 @@ class DataSet:
     def __init__(
             self,
             mode: str = "full",
+            root: str = None,
+            cache_path: str = None,
             downsample: int = 1,
             normalize: bool = True,
             crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
@@ -47,6 +49,8 @@ class DataSet:
         self.normalize = normalize
         self.crop_size = crop
         self.padding = padding
+
+        self.data = self.load(root, cache_path)
 
     def collect_paths(
             self,
@@ -65,6 +69,8 @@ class DataSet:
             n = 32
         elif self.mode == "small":
             n = 64
+        elif self.mode == "half":
+            n = 477
         else:
             n = 10000
 
@@ -116,15 +122,23 @@ class DataSet:
 
             progress_bar.close()
 
-            data = np.expand_dims(data, axis=1)  # add channel dimension
-
             if cache_path:
                 print(f"Storing transformed data as {cached_file}")
                 np.save(cached_file, data)
 
         return data
 
+    def get_train_val_loader(self, batch_size, split_ratio=0.9):
+        if split_ratio == 1.0:
+            return DataLoader(self.data, batch_size=batch_size, shuffle=True)
+        else:
+            n_train = int(self.data.shape[0] * 0.9)
+            train_loader = DataLoader(self.data[:n_train, ...], batch_size=batch_size, shuffle=True)
+            val_loader = DataLoader(self.data[n_train:, ...], batch_size=batch_size, shuffle=False)
+            return train_loader, val_loader
 
-class TinyDataSet(DataSet):
-    def __int__(self):
-        self.mode = "tiny"
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
