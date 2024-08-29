@@ -142,6 +142,6 @@ class DataSet:
 
     def __getitem__(self, idx):
         return self.data[idx]
-    
+
     def get_data(self):
         return self.data
