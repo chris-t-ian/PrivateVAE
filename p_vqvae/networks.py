@@ -148,7 +148,9 @@ class VQ_VAE:
         val_loss /= val_step
         self.val_recon_epoch_loss_list.append(val_loss)
 
-    def predict(self, img):
+    def predict(self, img: torch.Tensor | np.ndarray):
+        if type(img) == np.ndarray:
+            img = torch.from_numpy(img)
         assert len(img.shape) == 5, f"input shape of image is {len(img.shape)}, should be 5"
         reconstruction, _ = self.model(images=img)
         return reconstruction
@@ -349,7 +351,9 @@ class TransformerDecoder_VQVAE:
         val_loss /= val_step
         self.val_ce_epoch_loss_list.append(val_loss)
 
-    def predict(self, img):
+    def predict(self, img: torch.Tensor | np.ndarray):
+        if type(img) == np.ndarray:
+            img = torch.from_numpy(img)
         prediction = self.inferer.__call__(
             inputs=img,
             vqvae_model=self.vqvae_model,
