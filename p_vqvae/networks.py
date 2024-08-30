@@ -33,6 +33,7 @@ class VQ_VAE:
         n_example_images=4,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=True,
+        use_checkpointing=False,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -52,6 +53,7 @@ class VQ_VAE:
         self.n_example_images = n_example_images
         self.device = device
         self.multiple_devices = multiple_devices
+        self.use_checkpointing = use_checkpointing
         self.model = self._init_model()
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.reconstruction_loss = reconstruction_loss
@@ -59,6 +61,8 @@ class VQ_VAE:
         self.epoch_quant_loss_list = []
         self.val_recon_epoch_loss_list = []
         self.intermediary_images = []
+        self.final_reconstructions = None
+        self.images = None
 
     def _init_model(self):
         model = VQVAE(
@@ -72,6 +76,7 @@ class VQ_VAE:
             upsample_parameters=self.upsample_parameters,
             num_embeddings=self.num_embeddings,
             embedding_dim=self.embedding_dim,
+            use_checkpointing=self.use_checkpointing,
         )
         model.to(self.device, dtype=torch.float32)
 
@@ -119,6 +124,9 @@ class VQ_VAE:
             if (epoch + 1) % self.val_interval == 0:
                 self.validate(epoch)
 
+        self.final_reconstructions = reconstruction[:5].cpu()
+        self.images = images[:5].cpu()
+
         total_time = time.time() - total_start
         print(f"train completed, total time: {total_time}.")
 
@@ -140,6 +148,11 @@ class VQ_VAE:
         val_loss /= val_step
         self.val_recon_epoch_loss_list.append(val_loss)
 
+    def predict(self, img):
+        assert len(img.shape) == 5, f"input shape of image is {len(img.shape)}, should be 5"
+        reconstruction, _ = self.model(images=img)
+        return reconstruction
+
     def create_synthetic_images(self, num_images=4):
         self.model.eval()
 
@@ -158,6 +171,9 @@ class VQ_VAE:
             synthetic_images = self.model.decode_samples(random_indices)
 
         return synthetic_images.cpu().numpy()
+
+    def get_final_reconstructions_and_images(self):
+        return self.final_reconstructions, self.images
 
     def save(self, model_path, **kwargs):
         """
@@ -243,7 +259,7 @@ class TransformerDecoder_VQVAE:
         self.intermediary_images = []
 
         self.inferer = VQVAETransformerInferer()
-        self.model = self._init_model()
+        self.transformer_model = self._init_model()
 
     def _init_model(self):
         test_scan = next(iter(self.train_loader)).to(self.device, dtype=self.dtype)
@@ -272,7 +288,7 @@ class TransformerDecoder_VQVAE:
         self.vqvae_model.eval()
         total_start = time.time()
         for epoch in range(self.n_epochs):
-            self.model.train()
+            self.transformer_model.train()
             epoch_loss = 0
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
@@ -282,7 +298,7 @@ class TransformerDecoder_VQVAE:
                 self.optimizer.zero_grad(set_to_none=True)
 
                 logits, target, _ = self.inferer(
-                    images, self.vqvae_model, self.model, self.ordering, return_latent=True
+                    images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
                 )
                 logits = logits.transpose(1, 2)
 
@@ -303,13 +319,13 @@ class TransformerDecoder_VQVAE:
         print(f"train completed, total time: {total_time}.")
 
     def validate(self):
-        self.model.eval()
+        self.transformer_model.eval()
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
                 images = batch.to(self.device).float()
                 logits, quantizations_target, _ = self.inferer(
-                    images, self.vqvae_model, self.model, self.ordering, return_latent=True
+                    images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
                 )
                 logits = logits.transpose(1, 2)
 
@@ -320,32 +336,42 @@ class TransformerDecoder_VQVAE:
                     spatial_shape = self.vqvae_model.encode_stage_2_inputs(next(iter(self.train_loader))).shape[2:]
                     sample = self.inferer.sample(
                         vqvae_model=self.vqvae_model,
-                        transformer_model=self.model,
+                        transformer_model=self.transformer_model,
                         ordering=self.ordering,
                         latent_spatial_dim=spatial_shape,
                         starting_tokens=self.vqvae_model.num_embeddings
                         * torch.ones((1, 1), device=self.device),
                     )
-                    self.intermediary_images.append(sample[:, 0])
+                    self.intermediary_images.append(sample[:, 0].cpu())
 
                 val_loss += loss.item()
 
         val_loss /= val_step
         self.val_ce_epoch_loss_list.append(val_loss)
 
-    def create_synthetic_images(self, num_images=10):
+    def predict(self, img):
+        prediction = self.inferer.__call__(
+            inputs=img,
+            vqvae_model=self.vqvae_model,
+            transformer_model=self.transformer_model,
+            ordering=self.ordering,
+        ).cpu()
+        return prediction
+
+    def create_synthetic_images(self, num_images=10, temperature=1.0):
         self.vqvae_model.eval()
-        self.model.eval()
+        self.transformer_model.eval()
         generated_images = []
 
         with torch.no_grad():
             for i in range(num_images):
                 sample = self.inferer.sample(
                     vqvae_model=self.vqvae_model,
-                    transformer_model=self.model,
+                    transformer_model=self.transformer_model,
                     ordering=self.ordering,
                     latent_spatial_dim=self.vqvae_model.encode_stage_2_inputs(next(iter(self.train_loader))).shape[2:],
                     starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
+                    temperature=temperature,
                 )
                 generated_image = sample[0, 0].cpu().numpy()
                 generated_images.append(generated_image)
@@ -367,7 +393,7 @@ class TransformerDecoder_VQVAE:
         full_path = os.path.join(model_path, filename)
         if not os.path.exists(model_path):
             os.makedirs(model_path)
-        torch.save(self.model.state_dict(), full_path)
+        torch.save(self.transformer_model.state_dict(), full_path)
         print(f"Model saved to {full_path}")
 
     def load(self, model_path, **kwargs):
@@ -386,7 +412,7 @@ class TransformerDecoder_VQVAE:
         full_path = os.path.join(model_path, filename)
         if os.path.exists(full_path):
             state_dict = torch.load(full_path)
-            self.model.load_state_dict(state_dict)
+            self.transformer_model.load_state_dict(state_dict)
             print(f"Model loaded from {full_path}")
         else:
             print(f"Model file not found: {full_path}")
