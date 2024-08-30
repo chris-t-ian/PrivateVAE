@@ -51,6 +51,7 @@ class VQ_VAE:
         self.val_interval = val_interval
         self.n_example_images = n_example_images
         self.device = device
+        self.multiple_devices = multiple_devices
         self.model = self._init_model()
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.reconstruction_loss = reconstruction_loss
@@ -58,7 +59,6 @@ class VQ_VAE:
         self.epoch_quant_loss_list = []
         self.val_recon_epoch_loss_list = []
         self.intermediary_images = []
-        self.multiple_devices = multiple_devices
 
     def _init_model(self):
         model = VQVAE(
