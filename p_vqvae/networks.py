@@ -31,7 +31,8 @@ class VQ_VAE:
         n_epochs=100,
         val_interval=10,
         n_example_images=4,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        multiple_devices=True,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -57,6 +58,7 @@ class VQ_VAE:
         self.epoch_quant_loss_list = []
         self.val_recon_epoch_loss_list = []
         self.intermediary_images = []
+        self.multiple_devices = multiple_devices
 
     def _init_model(self):
         model = VQVAE(
@@ -72,6 +74,10 @@ class VQ_VAE:
             embedding_dim=self.embedding_dim,
         )
         model.to(self.device, dtype=torch.float32)
+
+        # use all GPUS if available
+        if self.multiple_devices and torch.cuda.is_available():
+            model = torch.nn.DataParallel(model)
         return model
 
     def train(self):
@@ -176,7 +182,6 @@ class VQ_VAE:
         Loads the model weights based on hyperparameters.
 
         Args:
-            model: The PyTorch model to load weights into.
             model_path: The base directory where the model is saved.
             **kwargs: Keyword arguments representing hyperparameters.
         """
@@ -207,6 +212,7 @@ class TransformerDecoder_VQVAE:
         val_interval=10,
         dtype=torch.float32,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        multiple_devices=True,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -222,6 +228,7 @@ class TransformerDecoder_VQVAE:
 
         self.val_interval = val_interval
         self.device = device
+        self.multiple_devices = multiple_devices
         self.optimizer = torch.optim.Adam(params=self.vqvae_model.parameters(), lr=self.lr)
         self.ce_loss = CrossEntropyLoss()
 
@@ -255,6 +262,9 @@ class TransformerDecoder_VQVAE:
             attn_layers_depth=self.attn_layers_depth,
             attn_layers_heads=self.attn_layers_heads,
         )
+        # use all GPUS if available
+        if self.multiple_devices and torch.cuda.is_available():
+            model = torch.nn.DataParallel(model)
         model = model.to(self.device, dtype=self.dtype)
         return model
 
@@ -380,5 +390,3 @@ class TransformerDecoder_VQVAE:
             print(f"Model loaded from {full_path}")
         else:
             print(f"Model file not found: {full_path}")
-
-
