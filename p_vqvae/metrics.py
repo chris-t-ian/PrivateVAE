@@ -31,7 +31,6 @@ def calculate_FMD_3D(real_images, generated_images, device=None):
             """
     real_images, generated_images = check_dimension_and_type(real_images, generated_images, dtype=torch.float32)
     input_shape = real_images.shape[1:]
-    print(input_shape)
 
     opt = MedNetOptions(
         model='resnet',
@@ -50,7 +49,6 @@ def calculate_FMD_3D(real_images, generated_images, device=None):
         input_img_size=input_shape)
 
     if device:
-        print("device")
         fid_metric = fid_metric.to(device)
         real_images = real_images.to(device)
         generated_images = generated_images.to(device)
