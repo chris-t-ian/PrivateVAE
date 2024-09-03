@@ -44,17 +44,30 @@ def plot_reconstructions(img: np.array, reconstructions: np.array, n=1):
     fig, ax = plt.subplots(nrows=n, ncols=2)
     plt.style.use("default")
 
-    for i in range(n):
-        reconstruction = get3d_middle_slices(reconstructions[i])
+    if n==1:
+        reconstruction = get3d_middle_slices(reconstructions[0])
 
-        ax[0, i].imshow(reconstruction, cmap="gray")
-        ax[0, i].axis("off")
-        ax[0, i].title.set_text(f"Reconstructed image {i}")
+        ax[0].imshow(reconstruction, cmap="gray")
+        ax[0].axis("off")
+        ax[0].title.set_text(f"Reconstructed image")
 
-        image = get3d_middle_slices(img[i])
+        image = get3d_middle_slices(img[0])
 
-        ax[1, i].imshow(image, cmap="gray")
-        ax[1, i].axis("off")
-        ax[1, i].title.set_text(f"Real image {i}")
+        ax[1].imshow(image, cmap="gray")
+        ax[1].axis("off")
+        ax[1].title.set_text(f"Real image")
+    else:
+        for i in range(n):
+            reconstruction = get3d_middle_slices(reconstructions[i])
+
+            ax[0, i].imshow(reconstruction, cmap="gray")
+            ax[0, i].axis("off")
+            ax[0, i].title.set_text(f"Reconstructed image {i}")
+
+            image = get3d_middle_slices(img[i])
+
+            ax[1, i].imshow(image, cmap="gray")
+            ax[1, i].axis("off")
+            ax[1, i].title.set_text(f"Real image {i}")
 
     plt.show()
