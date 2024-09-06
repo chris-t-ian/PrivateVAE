@@ -152,7 +152,12 @@ def calculate_and_save_all_metrics(real_data, real_sym, synthetic_data, generate
 
     with open(full_path, 'a', newline='') as file:
         writer = csv.DictWriter(file, fieldnames=header)
-        writer.writeheader()
+
+        # check if header exists, if not, write new header
+        sniffer = csv.Sniffer()
+        if not sniffer.has_header(file.read(2048)):
+            writer.writeheader()
+
         writer.writerows(metrics)
 
         file.close()
