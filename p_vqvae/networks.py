@@ -31,9 +31,10 @@ class VQ_VAE:
         n_epochs=100,
         val_interval=10,
         n_example_images=4,
+        dtype=torch.float32,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=True,
-        use_checkpointing=False,
+        use_checkpointing=True,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -54,6 +55,7 @@ class VQ_VAE:
         self.device = device
         self.multiple_devices = multiple_devices
         self.use_checkpointing = use_checkpointing
+        self.dtype = dtype
         self.model = self._init_model()
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.reconstruction_loss = reconstruction_loss
@@ -78,7 +80,7 @@ class VQ_VAE:
             embedding_dim=self.embedding_dim,
             use_checkpointing=self.use_checkpointing,
         )
-        model.to(self.device, dtype=torch.float32)
+        model.to(self.device, dtype=self.dtype)
 
         # use all GPUS if available
         if self.multiple_devices and torch.cuda.is_available():
@@ -93,7 +95,7 @@ class VQ_VAE:
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
-                images = batch.to(self.device, dtype=torch.float32)
+                images = batch.to(self.device, dtype=self.dtype)
 
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -148,12 +150,12 @@ class VQ_VAE:
         val_loss /= val_step
         self.val_recon_epoch_loss_list.append(val_loss)
 
-    def predict(self, img: torch.Tensor | np.ndarray):
+    def predict(self, img):
         if type(img) == np.ndarray:
-            img = torch.from_numpy(img)
+            img = torch.from_numpy(img).to(self.device, dtype=self.dtype)
         assert len(img.shape) == 5, f"input shape of image is {len(img.shape)}, should be 5"
         reconstruction, _ = self.model(images=img)
-        return reconstruction
+        return reconstruction.cpu()
 
     def create_synthetic_images(self, num_images=4):
         self.model.eval()
@@ -351,7 +353,7 @@ class TransformerDecoder_VQVAE:
         val_loss /= val_step
         self.val_ce_epoch_loss_list.append(val_loss)
 
-    def predict(self, img: torch.Tensor | np.ndarray):
+    def predict(self, img):
         if type(img) == np.ndarray:
             img = torch.from_numpy(img)
         prediction = self.inferer.__call__(
