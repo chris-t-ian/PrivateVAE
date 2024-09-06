@@ -3,10 +3,11 @@ import numpy as np
 
 import nibabel as nib
 from monai.data import DataLoader
+from monai.transforms import Compose
 from tqdm import tqdm
 
 
-def transform(data: np.array, downsample_factor: int = 1, normalize: bool = True,
+def transform(data: np.array, downsample_factor: int = 1, normalize: int = None,
               crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
               padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None) -> np.array:
     """
@@ -18,10 +19,14 @@ def transform(data: np.array, downsample_factor: int = 1, normalize: bool = True
         f = downsample_factor
         data = data[::f, ::f, ::f]  # downsample image, take every f-th element
     if normalize:
-        data = (data - data.min()) / (data.max() - data.min())
+        data = (data - data.min()) / (data.max() - data.min()) * normalize
     if padding:
         data = np.pad(data, padding, mode='constant')
     return data
+
+
+def augment():
+    pass
 
 
 class DataSet:
@@ -39,9 +44,10 @@ class DataSet:
             root: str = None,
             cache_path: str = None,
             downsample: int = 1,
-            normalize: bool = True,
+            normalize: int = 1,
+            dtype: np.dtype = np.float16,
             crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
-            padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None
+            padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
     ):
         self.mode = mode
         self.downsample = downsample
@@ -49,8 +55,9 @@ class DataSet:
         self.normalize = normalize
         self.crop_size = crop
         self.padding = padding
+        self.dtype = dtype
 
-        self.data = self.load(root, cache_path)
+        self.data = self.__load__(root, cache_path)
 
     def collect_paths(
             self,
@@ -89,7 +96,7 @@ class DataSet:
 
         return img_paths
 
-    def load(self, parent_path: str, cache_path: str) -> np.array:
+    def __load__(self, parent_path: str, cache_path: str) -> np.array:
         """
         Load data from parent_path and apply transforms. If initiated for the first time load all T1 files.
 
@@ -110,12 +117,12 @@ class DataSet:
             img = img.get_fdata()  # This will not load the entire file into memory
             img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
             shape = (len(paths), 1, img.shape[0], img.shape[1], img.shape[2])
-            data = np.empty(shape, dtype=np.float16)
+            data = np.empty(shape, dtype=self.dtype)
 
             # Load images using memory mapping
             for k, img_path in enumerate(paths):
                 img = nib.load(img_path, mmap=True)  # Use memory mapping
-                img = img.get_fdata().astype(np.float16)  # This will not load the entire file into memory
+                img = img.get_fdata().astype(self.dtype)  # This will not load the entire file into memory
                 img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
                 data[k, 0, :, :, :] = img[:, :, :]
                 progress_bar.update(1)
@@ -128,13 +135,27 @@ class DataSet:
 
         return data
 
-    def get_train_val_loader(self, batch_size, split_ratio=0.9):
-        if split_ratio == 1.0:
-            return DataLoader(self.data, batch_size=batch_size, shuffle=True)
+    def get_train_val_loader(self, batch_size, split_ratio=0.9, dtype: np.dtype = None):
+        if self.dtype == dtype or not dtype:
+            data = self.data
+        elif dtype and dtype in [np.float16, np.float32, np.float64] and self.data == np.uint8:
+            data = self.data.astype(dtype)
+            data = data / 255
+        elif dtype and dtype == np.uint8 and self.dtype in [np.float16, np.float32, np.float64]:
+            assert self.data.max() < 1.001, f"Dataset is not normalized properly. It ranges from {self.data.min()}"\
+                                            f" to {self.data.max()}"
+            data = self.data * 255
+            data = data.astype(np.uint8)
+            self.dtype = dtype
         else:
-            n_train = int(self.data.shape[0] * 0.9)
-            train_loader = DataLoader(self.data[:n_train, ...], batch_size=batch_size, shuffle=True)
-            val_loader = DataLoader(self.data[n_train:, ...], batch_size=batch_size, shuffle=False)
+            raise Exception("This dtype is currently not supported.")
+
+        if split_ratio == 1.0:
+            return DataLoader(data, batch_size=batch_size, shuffle=True)
+        else:
+            n_train = int(data.shape[0] * 0.9)
+            train_loader = DataLoader(data[:n_train, ...], batch_size=batch_size, shuffle=True)
+            val_loader = DataLoader(data[n_train:, ...], batch_size=batch_size, shuffle=False)
             return train_loader, val_loader
 
     def __len__(self):
