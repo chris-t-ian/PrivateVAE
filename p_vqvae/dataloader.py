@@ -3,11 +3,13 @@ import numpy as np
 
 import nibabel as nib
 from monai.data import DataLoader
-from monai.transforms import Compose
+from monai.data import Dataset as DataSet_monai
+from monai.transforms import Compose, RandAffine, RandShiftIntensity, RandGaussianNoise, ThresholdIntensity, ToTensor
+from torch.utils.data import random_split
 from tqdm import tqdm
 
 
-def transform(data: np.array, downsample_factor: int = 1, normalize: int = None,
+def preprocess(data: np.array, downsample_factor: int = 1, normalize: int = None,
               crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
               padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None) -> np.array:
     """
@@ -15,21 +17,58 @@ def transform(data: np.array, downsample_factor: int = 1, normalize: int = None,
     """
     if crop:  # crop image
         data = data[crop[0][0]:-crop[0][1], crop[1][0]:-crop[1][1], crop[2][0]:-crop[2][1]]
-    if downsample_factor != 1:
+    if downsample_factor != 1:  # down-sample image, take every f-th element
         f = downsample_factor
-        data = data[::f, ::f, ::f]  # downsample image, take every f-th element
-    if normalize:
+        data = data[::f, ::f, ::f]
+    if normalize:  # normalize image to range [0, normalize]
         data = (data - data.min()) / (data.max() - data.min()) * normalize
-    if padding:
+    if padding:  #
         data = np.pad(data, padding, mode='constant')
     return data
 
 
-def augment():
-    pass
+def get_augmentation():
+    transforms = Compose([
+        # Step 1: Random Affine transformation
+        RandAffine(
+            prob=0.8,
+            rotate_range=(0.04, 0.04),  # Rotation range in radians
+            translate_range=(2, 2),  # Translation range in pixels
+            scale_range=(0.05, 0.05),  # Scaling range
+        ),
+
+        # Step 2: Random Intensity Shift
+        RandShiftIntensity(
+            offsets=0.05,  # Max offset for intensity shift
+            prob=0.3
+        ),
+
+        # Step 3: Random Gaussian Noise
+        RandGaussianNoise(
+            prob=0.6,
+            mean=0.0,
+            std=0.02
+        ),
+
+        # Step 4: Thresholding to ensure values are within [0, 1.0]
+        ThresholdIntensity(
+            threshold=0.0,  # Min value
+            above=False,  # Values above the threshold will be set to 0
+            cval=0.0  # Clipping value
+        ),
+        ThresholdIntensity(
+            threshold=1.0,  # Max value
+            above=True,  # Values above the threshold will be set to 1
+            cval=1.0  # Clipping value
+        ),
+
+        ToTensor()
+
+    ])
+    return transforms
 
 
-class DataSet:
+class DataSet(DataSet_monai):
     """
     A generic dataset tailored to ATLAS v2.
 
@@ -49,6 +88,7 @@ class DataSet:
             crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
             padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
     ):
+
         self.mode = mode
         self.downsample = downsample
         self.prefix = f"_{mode}_smpl{downsample}"
@@ -56,8 +96,22 @@ class DataSet:
         self.crop_size = crop
         self.padding = padding
         self.dtype = dtype
+        self.transform = get_augmentation()
 
         self.data = self.__load__(root, cache_path)
+        super().__init__(self.data)
+
+    # overriding __len__ and __getitem__ methods of DataSet_monai
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        image = np.copy(self.data[idx])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return {"image": image}
 
     def collect_paths(
             self,
@@ -76,6 +130,8 @@ class DataSet:
             n = 32
         elif self.mode == "small":
             n = 64
+        elif self.mode == "third":
+            n = 318
         elif self.mode == "half":
             n = 477
         else:
@@ -107,7 +163,7 @@ class DataSet:
 
         cached_file = os.path.join(cache_path, 'ATLAS_2' + self.prefix + '.npy')
         if os.path.isfile(cached_file) and cache_path:  # if file exists and cache path provided, load npy file
-            data = np.load(cached_file)
+            data = np.load(cached_file, mmap_mode='r')
         else:
             paths = self.collect_paths(parent_path)
             progress_bar = tqdm(total=len(paths), ncols=110, desc="Loading T1 images")  # initialise progress bar
@@ -115,7 +171,7 @@ class DataSet:
             # load first image to define shape
             img = nib.load(paths[0], mmap=True)  # Use memory mapping
             img = img.get_fdata()  # This will not load the entire file into memory
-            img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
+            img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
             shape = (len(paths), 1, img.shape[0], img.shape[1], img.shape[2])
             data = np.empty(shape, dtype=self.dtype)
 
@@ -123,7 +179,7 @@ class DataSet:
             for k, img_path in enumerate(paths):
                 img = nib.load(img_path, mmap=True)  # Use memory mapping
                 img = img.get_fdata().astype(self.dtype)  # This will not load the entire file into memory
-                img = transform(img, self.downsample, self.normalize, self.crop_size, self.padding)
+                img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
                 data[k, 0, :, :, :] = img[:, :, :]
                 progress_bar.update(1)
 
@@ -135,34 +191,34 @@ class DataSet:
 
         return data
 
-    def get_train_val_loader(self, batch_size, split_ratio=0.9, dtype: np.dtype = None):
-        if self.dtype == dtype or not dtype:
-            data = self.data
-        elif dtype and dtype in [np.float16, np.float32, np.float64] and self.data == np.uint8:
-            data = self.data.astype(dtype)
-            data = data / 255
-        elif dtype and dtype == np.uint8 and self.dtype in [np.float16, np.float32, np.float64]:
-            assert self.data.max() < 1.001, f"Dataset is not normalized properly. It ranges from {self.data.min()}"\
-                                            f" to {self.data.max()}"
-            data = self.data * 255
-            data = data.astype(np.uint8)
-            self.dtype = dtype
-        else:
-            raise Exception("This dtype is currently not supported.")
-
-        if split_ratio == 1.0:
-            return DataLoader(data, batch_size=batch_size, shuffle=True)
-        else:
-            n_train = int(data.shape[0] * 0.9)
-            train_loader = DataLoader(data[:n_train, ...], batch_size=batch_size, shuffle=True)
-            val_loader = DataLoader(data[n_train:, ...], batch_size=batch_size, shuffle=False)
-            return train_loader, val_loader
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
     def get_data(self):
         return self.data
+
+
+def get_train_val_loader(
+        dataset: DataSet,
+        batch_size: int = 8,
+        augment_flag=True,
+        split_ratio: float = 0.875,
+        num_workers=8,
+        ):
+
+    transform = get_augmentation() if augment_flag else ToTensor()
+
+    if split_ratio == 1.0:
+        dataset.transform = transform
+
+        # DataLoader calls __getitem__ and therefore performs the transform/augmentation on the fly
+        return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers), None
+    else:
+        train_size = int(len(dataset) * split_ratio)
+        test_size = len(dataset) - train_size
+
+        train_set, test_set = random_split(dataset, [train_size, test_size])
+
+        train_set.dataset.transform = transform if transform else ToTensor()
+        test_set.dataset.transform = ToTensor()  # no augmentation for test data
+
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        val_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        return train_loader, val_loader
