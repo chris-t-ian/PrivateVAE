@@ -24,14 +24,18 @@ class VQ_VAE:
         num_res_layers=2,
         downsample_parameters=((2, 4, 1, 1), (2, 4, 1, 1)),
         upsample_parameters=((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
+        # embeddings:
         num_embeddings=256,
         embedding_dim=32,
+        # learning
         lr=1e-4,
         reconstruction_loss=L1Loss(),
+        commitment_cost: float = 0.25,  # ensures that encoder output stays close to the selected codebook vector
         n_epochs=100,
-        val_interval=10,
-        n_example_images=4,
-        dtype=torch.float32,
+        val_interval=5,  # after how many training steps to calculate validation loss
+        early_stopping_patience=None,  # after how many training steps of not improving val loss, to stop the training
+        n_example_images=4,  # how many example reconstructions to save in self.final_reconstructions
+        dtype=torch.float32,  #
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=True,
         use_checkpointing=True,
@@ -49,8 +53,10 @@ class VQ_VAE:
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.lr = lr
+        self.commitment_cost = commitment_cost
         self.n_epochs = n_epochs
-        self.val_interval = val_interval
+        self.val_interval = 1 if early_stopping_patience else val_interval
+        self.early_stopping_patience = early_stopping_patience
         self.n_example_images = n_example_images
         self.device = device
         self.multiple_devices = multiple_devices
@@ -79,6 +85,7 @@ class VQ_VAE:
             num_embeddings=self.num_embeddings,
             embedding_dim=self.embedding_dim,
             use_checkpointing=self.use_checkpointing,
+            commitment_cost=self.commitment_cost,
         )
         model.to(self.device, dtype=self.dtype)
 
@@ -88,6 +95,10 @@ class VQ_VAE:
         return model
 
     def train(self):
+        val_loss = None
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        best_model_weights = None
         total_start = time.time()
         for epoch in range(self.n_epochs):
             self.model.train()
@@ -95,7 +106,7 @@ class VQ_VAE:
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
-                images = batch.to(self.device, dtype=self.dtype)
+                images = batch['image'].to(self.device, dtype=self.dtype)
 
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -124,7 +135,23 @@ class VQ_VAE:
             self.epoch_quant_loss_list.append(quantization_loss.item() / (step + 1))
 
             if (epoch + 1) % self.val_interval == 0:
-                self.validate(epoch)
+                val_loss = self.validate(epoch)
+
+                if self.early_stopping_patience and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_weights = self.model.state_dict()  # Save best weights
+                    epochs_without_improvement = 0  # Reset counter if improvement is found
+                else:
+                    epochs_without_improvement += 1
+
+            if epochs_without_improvement >= self.early_stopping_patience:
+                print(f"Early stopping at epoch {epoch + 1}.")
+
+                if best_model_weights:
+                    print("Loading best model weights so far.")
+                    self.model.load_state_dict(best_model_weights)
+
+                break
 
         self.final_reconstructions = reconstruction[:5].cpu()
         self.images = images[:5].cpu()
@@ -132,12 +159,14 @@ class VQ_VAE:
         total_time = time.time() - total_start
         print(f"train completed, total time: {total_time}.")
 
+        return val_loss
+
     def validate(self, epoch):
         self.model.eval()
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
-                images = batch.to(self.device, dtype=torch.float32)
+                images = batch['image'].to(self.device, dtype=torch.float32)
                 reconstruction, quantization_loss = self.model(images=images)
 
                 if val_step == 1:
@@ -149,6 +178,7 @@ class VQ_VAE:
 
         val_loss /= val_step
         self.val_recon_epoch_loss_list.append(val_loss)
+        return val_loss
 
     def predict(self, img):
         if type(img) == np.ndarray:
@@ -160,7 +190,7 @@ class VQ_VAE:
     def create_synthetic_images(self, num_images=4):
         self.model.eval()
 
-        test_scan = next(iter(self.train_loader)).to(self.device).float()
+        test_scan = next(iter(self.train_loader))['image'].to(self.device).float()
 
         latent_shape = self.model.encode(test_scan).shape
         spatial_shape = latent_shape[2:]
@@ -297,7 +327,7 @@ class TransformerDecoder_VQVAE:
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
-                images = batch.to(self.device).float()
+                images = batch['image'].to(self.device).float()
 
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -327,7 +357,7 @@ class TransformerDecoder_VQVAE:
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
-                images = batch.to(self.device).float()
+                images = batch['image'].to(self.device).float()
                 logits, quantizations_target, _ = self.inferer(
                     images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
                 )
