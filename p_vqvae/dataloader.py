@@ -113,6 +113,19 @@ class DataSet(DataSet_monai):
 
         return {"image": image}
 
+    def get_images(self, range_indices: list):
+        assert len(range_indices) == 2, "Provided range indices are not a list of two values"
+
+        n_images = range_indices[1] - range_indices[0]
+
+        shape = (n_images, self.data.shape[1], self.data.shape[2], self.data.shape[3], self.data.shape[4])
+        images = np.empty(shape, dtype=self.dtype)
+
+        for i in range(n_images):
+            img = np.copy(self.data[range_indices[0] + i])
+            images[i] = img
+        return images
+
     def collect_paths(
             self,
             parent_path: str = os.getcwd(),
