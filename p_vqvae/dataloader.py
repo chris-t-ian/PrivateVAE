@@ -235,3 +235,15 @@ def get_train_val_loader(
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
         val_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         return train_loader, val_loader
+
+
+def get_train_loader(
+    dataset: DataSet,
+    batch_size: int = 8,
+    augment_flag=True,
+    num_workers=8,
+):
+    transform = get_augmentation() if augment_flag else ToTensor()
+    dataset.transform = transform
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
