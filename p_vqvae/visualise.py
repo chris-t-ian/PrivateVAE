@@ -71,3 +71,41 @@ def plot_reconstructions(img: np.array, reconstructions: np.array, n=1):
             ax[1, i].title.set_text(f"Real image {i}")
 
     plt.show()
+
+
+def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.array, k=0):
+    img = check_and_remove_channel_dimension(img)
+    reconstructions = check_and_remove_channel_dimension(reconstructions)
+    synthetic = check_and_remove_channel_dimension(synthetic)
+
+    assert img.shape == reconstructions.shape, f"shape mismatch between inputs {img.shape} vs {reconstructions.shape}"
+    assert img.shape == synthetic.shape, f"shape mismatch between inputs {img.shape} vs {synthetic.shape}"
+
+    fig, ax = plt.subplots(nrows=3, ncols=1)
+    plt.style.use("default")
+
+    titles = ["Real image", "Reconstruction", "Sampled"]
+    images = [img, reconstructions, synthetic]
+
+    for i, y in enumerate(images):
+        x = np.concatenate([
+            y[k, :, :, y.shape[3]//2],
+            np.flipud(y[k, :, y.shape[2]//2, :].T),
+            np.flipud(y[k, y.shape[1]//2, :, :].T),
+        ], axis=1)
+        ax[i].imshow(x, cmap="gray")
+        ax[i].set_xticks([])
+        ax[i].set_yticks([])
+        ax[i].set_ylabel(titles[i])
+
+    plt.show()
+
+
+
+
+
+
+
+
+
+
