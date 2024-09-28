@@ -262,7 +262,7 @@ class TransformerDecoder_VQVAE:
         val_interval=10,
         dtype=torch.float32,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        multiple_devices=True,
+        multiple_devices=False,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -285,8 +285,12 @@ class TransformerDecoder_VQVAE:
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
             spatial_dims=3,
-            dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(next(iter(train_loader))).shape[2:],
+            dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
+                next(iter(train_loader))['image'].to(self.device, dtype=self.dtype)).shape[2:],
         )
+
+        self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
+                        next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)).shape[2:]
 
         self.epoch_ce_loss_list = []
         self.val_ce_epoch_loss_list = []
@@ -296,7 +300,7 @@ class TransformerDecoder_VQVAE:
         self.transformer_model = self._init_model()
 
     def _init_model(self):
-        test_scan = next(iter(self.train_loader)).to(self.device, dtype=self.dtype)
+        test_scan = next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)
         spatial_shape = self.vqvae_model.encode_stage_2_inputs(test_scan).shape[2:]
 
         # define maximum sequence length
@@ -357,7 +361,7 @@ class TransformerDecoder_VQVAE:
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
-                images = batch['image'].to(self.device).float()
+                images = batch['image'].to(self.device, dtype=self.dtype)
                 logits, quantizations_target, _ = self.inferer(
                     images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
                 )
@@ -367,12 +371,11 @@ class TransformerDecoder_VQVAE:
 
                 # Generate a random sample to visualise progress
                 if val_step == 1:
-                    spatial_shape = self.vqvae_model.encode_stage_2_inputs(next(iter(self.train_loader))).shape[2:]
                     sample = self.inferer.sample(
                         vqvae_model=self.vqvae_model,
                         transformer_model=self.transformer_model,
                         ordering=self.ordering,
-                        latent_spatial_dim=spatial_shape,
+                        latent_spatial_dim=self.latent_spatial_dim,
                         starting_tokens=self.vqvae_model.num_embeddings
                         * torch.ones((1, 1), device=self.device),
                     )
@@ -405,7 +408,7 @@ class TransformerDecoder_VQVAE:
                     vqvae_model=self.vqvae_model,
                     transformer_model=self.transformer_model,
                     ordering=self.ordering,
-                    latent_spatial_dim=self.vqvae_model.encode_stage_2_inputs(next(iter(self.train_loader))).shape[2:],
+                    latent_spatial_dim=self.latent_spatial_dim,
                     starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
                     temperature=temperature,
                 )
@@ -422,7 +425,7 @@ class TransformerDecoder_VQVAE:
             model_path: The base directory where the model will be saved.
             **kwargs: Additional keyword arguments representing hyperparameters.
         """
-        filename = "VQVAE"
+        filename = "transformer_VQVAE"
         for key, value in kwargs.items():
             filename += f"_{key}{value}"
         filename += ".pth"
