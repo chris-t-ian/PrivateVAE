@@ -3,12 +3,15 @@ import torch
 import pandas as pd
 
 from p_vqvae.dataloader import DataSet, get_train_val_loader
-from p_vqvae.networks import VQ_VAE
+from p_vqvae.networks import VQ_VAE, TransformerDecoder_VQVAE
 from p_vqvae.visualise import plot_generated_images, plot_reconstructions
 from monai.utils import set_determinism
 from p_vqvae.metrics import calculate_and_save_all_metrics
 
+# TODO: temperature should be tuned with the subjective eye, since metrics might not capture
+
 epochs = 150
+epochs_transformer = 50
 down_sampling = 4
 root = "/home/chrsch/P_VQVAE/data/ATLAS_2"
 cache_path = '/home/chrsch/P_VQVAE/data/cache/'
@@ -18,7 +21,7 @@ hyperparameter_log = "/home/chrsch/P_VQVAE/model_outputs/hyperparameters_search.
 
 
 def objective_vqvae(trial):
-    # Define the hyperparameter search space
+    # Define the hyperparameter search space for the VQVAE
     augment_flag = trial.suggest_categorical("augmentation", [True, False])
     batch_size = trial.suggest_categorical("batch_size", [8, 16, 32])
     learning_rate = trial.suggest_loguniform("learning_rate", 5e-5, 1e-3)
@@ -44,6 +47,12 @@ def objective_vqvae(trial):
     else:
         raise NotImplementedError
 
+    # Define hyperparameter search for transformer decoder
+    transfomer_learning_rate = trial.suggest_loguniform("learning_rate_transformer", 1e-5, 1e-4)
+    attn_layers_heads = trial.suggest_int("attn_layers_heads", 8, 16, step=8)
+    attn_layers_dim = trial.suggest_int("attn_layers_dim", 96, 256, step=32)
+    attn_layers_depth = trial.suggest_int("attn_layers_depth", 8, 32, step=8)
+
     dataset = DataSet("full",
                       root,
                       cache_path,
@@ -65,10 +74,19 @@ def objective_vqvae(trial):
                           downsample_parameters=downsample_parameters,
                           upsample_parameters=upsample_parameters,
                           use_checkpointing=True,
-                          val_interval=1)
-    val_loss = vq_vae_model.train()
+                          val_interval=1,
+                          early_stopping_patience=5)
+    val_loss_vqvae = vq_vae_model.train()
 
-    return val_loss
+    t_vq_vae_model = TransformerDecoder_VQVAE(
+        train_loader, val_loader, vq_vae_model, n_epochs=epochs_transformer, attn_layers_dim=attn_layers_dim,
+        attn_layers_depth=attn_layers_depth, attn_layers_heads=attn_layers_heads, lr=transfomer_learning_rate,
+        early_stopping_patience=5
+    )
+    val_loss_t_vqvae = t_vq_vae_model.train()
+
+    #return val_loss_vqvae, val_loss_t_vqvae
+    return val_loss_t_vqvae
 
 
 if __name__ == '__main__':
