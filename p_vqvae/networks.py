@@ -2,6 +2,7 @@ import os
 import torch
 import time
 import numpy as np
+import warnings
 from tqdm import tqdm
 from torch.nn import L1Loss, CrossEntropyLoss
 from monai.networks.nets import VQVAE
@@ -11,11 +12,78 @@ from monai.networks.nets import DecoderOnlyTransformer
 from monai.inferers import VQVAETransformerInferer
 
 
-class VQ_VAE:
+class BaseModel:
+    def __init__(self, model, model_path=None, base_filename=""):
+        self.trained_flag = False
+        self.model = model
+        self.model_path = model_path
+        self.base_filename = base_filename
+        self.full_path = None
+
+    def get_full_path(self, **kwargs):
+        filename = self.base_filename
+        for key, value in kwargs.items():
+            filename += f"_{key}{value}"
+        filename += ".pth"
+        return os.path.join(self.model_path, filename)
+
+    def save_or_load(self, **kwargs):
+        """If weights were saved previously, load them. If not, save them, but only if model was trained."""
+        self.full_path = self.get_full_path(**kwargs)
+        if os.path.exists(self.full_path) and not self.trained_flag:
+            self.load(**kwargs)
+        elif os.path.exists(self.full_path) and self.trained_flag:
+            response = input('The model you are trying to load has been trained. Overwrite existing weights? '
+                             '(y/n)\n')
+            if response in ["y", "Yes", "Y"]:
+                self.load(**kwargs)
+        elif not os.path.exists(self.full_path) and self.trained_flag:
+            self.save(**kwargs)
+        else:
+            warnings.warn(f"Model weights {self.full_path} does not exist. However, the model you are trying to save"
+                          f"does not appear to be trained.")
+            response = input("Save untrained model weights?\n")
+            if response in ["y", "Yes", "Y"]:
+                self.save(**kwargs)
+
+    def save(self, **kwargs):
+        """
+        Saves the model weights with a filename that includes hyperparameters.
+
+        Args:
+            model_path: The base directory where the model will be saved.
+            **kwargs: Additional keyword arguments representing hyperparameters.
+        """
+        self.full_path = self.get_full_path(**kwargs)
+        if not os.path.exists(self.model_path):
+            os.makedirs(self.model_path)
+        torch.save(self.model.state_dict(), self.full_path)
+        print(f"Model saved to {self.full_path}")
+
+    def load(self, **kwargs):
+        """
+        Loads the model weights based on hyperparameters.
+
+        Args:
+            model: The PyTorch model to load weights into.
+            model_path: The base directory where the model is saved.
+            **kwargs: Keyword arguments representing hyperparameters.
+        """
+        full_path = self.get_full_path(**kwargs)
+        if os.path.exists(full_path):
+            state_dict = torch.load(full_path)
+            self.model.load_state_dict(state_dict)
+            self.trained_flag = True
+            print(f"Model loaded from {self.full_path}")
+        else:
+            print(f"Model file not found: {self.full_path}")
+
+
+class VQ_VAE(BaseModel):
     def __init__(
         self,
         train_loader,
-        val_loader,
+        val_loader=None,
         spatial_dims=3,
         in_channels=1,
         out_channels=1,
@@ -33,12 +101,13 @@ class VQ_VAE:
         commitment_cost: float = 0.25,  # ensures that encoder output stays close to the selected codebook vector
         n_epochs=100,
         val_interval=5,  # after how many training steps to calculate validation loss
-        early_stopping_patience=None,  # after how many training steps of not improving val loss, to stop the training
+        early_stopping_patience=float('inf'),  # stop training after ... training steps of not improving val loss
         n_example_images=4,  # how many example reconstructions to save in self.final_reconstructions
         dtype=torch.float32,  #
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=True,
         use_checkpointing=True,
+        model_path=None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -71,6 +140,7 @@ class VQ_VAE:
         self.intermediary_images = []
         self.final_reconstructions = None
         self.images = None
+        super().__init__(self.model, model_path, base_filename="VQVAE")
 
     def _init_model(self):
         model = VQVAE(
@@ -114,7 +184,8 @@ class VQ_VAE:
 
                 if reconstruction.shape != images.shape:
                     print(
-                        f"Train Shape mismatch: Reconstruction shape: {reconstruction.shape}, Images shape: {images.shape}"
+                        f"Train Shape mismatch: Reconstruction shape: {reconstruction.shape}, Images shape: "
+                        f"{images.shape}"
                     )
 
                 recons_loss = self.reconstruction_loss(reconstruction.to(torch.float16), images)
@@ -134,10 +205,10 @@ class VQ_VAE:
             self.epoch_recon_loss_list.append(epoch_loss / (step + 1))
             self.epoch_quant_loss_list.append(quantization_loss.item() / (step + 1))
 
-            if (epoch + 1) % self.val_interval == 0:
+            if (epoch + 1) % self.val_interval == 0 and self.val_loader:
                 val_loss = self.validate(epoch)
 
-                if self.early_stopping_patience and val_loss < best_val_loss:
+                if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_weights = self.model.state_dict()  # Save best weights
                     epochs_without_improvement = 0  # Reset counter if improvement is found
@@ -158,6 +229,8 @@ class VQ_VAE:
 
         total_time = time.time() - total_start
         print(f"train completed, total time: {total_time}.")
+
+        self.trained_flag = True
 
         return val_loss
 
@@ -209,64 +282,28 @@ class VQ_VAE:
     def get_final_reconstructions_and_images(self):
         return self.final_reconstructions, self.images
 
-    def save(self, model_path, **kwargs):
-        """
-        Saves the model weights with a filename that includes hyperparameters.
 
-        Args:
-            model_path: The base directory where the model will be saved.
-            **kwargs: Additional keyword arguments representing hyperparameters.
-        """
-        filename = "VQVAE"
-        for key, value in kwargs.items():
-            filename += f"_{key}{value}"
-        filename += ".pth"
-        full_path = os.path.join(model_path, filename)
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-        torch.save(self.model.state_dict(), full_path)
-        print(f"Model saved to {full_path}")
-
-    def load(self, model_path, **kwargs):
-        """
-        Loads the model weights based on hyperparameters.
-
-        Args:
-            model_path: The base directory where the model is saved.
-            **kwargs: Keyword arguments representing hyperparameters.
-        """
-        filename = "VQVAE"
-        for key, value in kwargs.items():
-            filename += f"_{key}{value}"
-        filename += ".pth"
-        full_path = os.path.join(model_path, filename)
-        if os.path.exists(full_path):
-            state_dict = torch.load(full_path)
-            self.model.load_state_dict(state_dict)
-            print(f"Model loaded from {full_path}")
-        else:
-            print(f"Model file not found: {full_path}")
-
-
-class TransformerDecoder_VQVAE:
+class TransformerDecoder_VQVAE(BaseModel):
     def __init__(
         self,
-        train_loader,
-        val_loader,
         vqvae_model,
+        train_loader,
+        val_loader=None,
         attn_layers_dim=96,
         attn_layers_depth=12,
         attn_layers_heads=8,
         lr=5e-4,
         n_epochs=50,
         val_interval=10,
+        early_stopping_patience=float('inf'),  # stop training after this many  training steps of not improving val loss
         dtype=torch.float32,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=False,
+        model_path=None
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.vqvae_model = vqvae_model
+        self.vqvae_model = vqvae_model.model
         self.dtype = dtype
 
         # Transformer hyperparameters
@@ -277,10 +314,12 @@ class TransformerDecoder_VQVAE:
         self.n_epochs = n_epochs
 
         self.val_interval = val_interval
+        self.early_stopping_patience = early_stopping_patience
         self.device = device
         self.multiple_devices = multiple_devices
-        self.optimizer = torch.optim.Adam(params=self.vqvae_model.parameters(), lr=self.lr)
         self.ce_loss = CrossEntropyLoss()
+        self.calculate_intermediate_reconstructions = False
+        self.model_path = model_path
 
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
@@ -298,6 +337,9 @@ class TransformerDecoder_VQVAE:
 
         self.inferer = VQVAETransformerInferer()
         self.transformer_model = self._init_model()
+        self.optimizer = torch.optim.Adam(params=self.transformer_model.parameters(), lr=self.lr)
+
+        super().__init__(self.transformer_model, model_path, base_filename="transformer_VQVAE")
 
     def _init_model(self):
         test_scan = next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)
@@ -323,6 +365,10 @@ class TransformerDecoder_VQVAE:
         return model
 
     def train(self):
+        val_loss = None
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        best_model_weights = None
         self.vqvae_model.eval()
         total_start = time.time()
         for epoch in range(self.n_epochs):
@@ -350,11 +396,32 @@ class TransformerDecoder_VQVAE:
                 progress_bar.set_postfix({"ce_loss": epoch_loss / (step + 1)})
             self.epoch_ce_loss_list.append(epoch_loss / (step + 1))
 
-            if (epoch + 1) % self.val_interval == 0:
-                self.validate()
+            if (epoch + 1) % self.val_interval == 0 and self.val_loader:
+                val_loss = self.validate(epoch)
+
+                # early stopping
+                if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_weights = self.transformer_model.state_dict()  # Save best weights
+                    epochs_without_improvement = 0  # Reset counter if improvement is found
+                else:
+                    epochs_without_improvement += 1
+
+            if epochs_without_improvement >= self.early_stopping_patience:
+                print(f"Early stopping at epoch {epoch + 1}.")
+
+                if best_model_weights:
+                    print("Loading best model weights so far.")
+                    self.transformer_model.load_state_dict(best_model_weights)
+
+                break
 
         total_time = time.time() - total_start
         print(f"train completed, total time: {total_time}.")
+
+        self.trained_flag = True
+
+        return val_loss
 
     def validate(self):
         self.transformer_model.eval()
@@ -370,7 +437,7 @@ class TransformerDecoder_VQVAE:
                 loss = self.ce_loss(logits, quantizations_target)
 
                 # Generate a random sample to visualise progress
-                if val_step == 1:
+                if val_step == 1 and self.calculate_intermediate_reconstructions:
                     sample = self.inferer.sample(
                         vqvae_model=self.vqvae_model,
                         transformer_model=self.transformer_model,
@@ -385,6 +452,7 @@ class TransformerDecoder_VQVAE:
 
         val_loss /= val_step
         self.val_ce_epoch_loss_list.append(val_loss)
+        return val_loss
 
     def predict(self, img):
         if type(img) == np.ndarray:
@@ -417,41 +485,17 @@ class TransformerDecoder_VQVAE:
 
         return np.stack(generated_images)
 
-    def save(self, model_path, **kwargs):
-        """
-        Saves the model weights with a filename that includes hyperparameters.
 
-        Args:
-            model_path: The base directory where the model will be saved.
-            **kwargs: Additional keyword arguments representing hyperparameters.
-        """
-        filename = "transformer_VQVAE"
-        for key, value in kwargs.items():
-            filename += f"_{key}{value}"
-        filename += ".pth"
-        full_path = os.path.join(model_path, filename)
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-        torch.save(self.transformer_model.state_dict(), full_path)
-        print(f"Model saved to {full_path}")
+def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, transformer_training_kwargs: dict,
+                                saving_kwargs: dict):
 
-    def load(self, model_path, **kwargs):
-        """
-        Loads the model weights based on hyperparameters.
+    vqvae = VQ_VAE(train_loader, **vqvae_training_kwargs)
+    vqvae.train()
 
-        Args:
-            model: The PyTorch model to load weights into.
-            model_path: The base directory where the model is saved.
-            **kwargs: Keyword arguments representing hyperparameters.
-        """
-        filename = "VQVAE"
-        for key, value in kwargs.items():
-            filename += f"_{key}{value}"
-        filename += ".pth"
-        full_path = os.path.join(model_path, filename)
-        if os.path.exists(full_path):
-            state_dict = torch.load(full_path)
-            self.transformer_model.load_state_dict(state_dict)
-            print(f"Model loaded from {full_path}")
-        else:
-            print(f"Model file not found: {full_path}")
+    vqvae.save_or_load(**saving_kwargs)
+
+    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, **transformer_training_kwargs)
+    t_vqvae.train()
+    t_vqvae.save_or_load(**saving_kwargs)
+
+    return t_vqvae
