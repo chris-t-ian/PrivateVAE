@@ -13,12 +13,14 @@ from monai.inferers import VQVAETransformerInferer
 
 
 class BaseModel:
-    def __init__(self, model, model_path=None, base_filename=""):
+    def __init__(self, model, model_path=None, base_filename="",
+                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),):
         self.trained_flag = False
         self.model = model
         self.model_path = model_path
         self.base_filename = base_filename
         self.full_path = None
+        self.device = device
 
     def get_full_path(self, **kwargs):
         filename = self.base_filename
@@ -104,7 +106,6 @@ class VQ_VAE(BaseModel):
         early_stopping_patience=float('inf'),  # stop training after ... training steps of not improving val loss
         n_example_images=4,  # how many example reconstructions to save in self.final_reconstructions
         dtype=torch.float32,  #
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=True,
         use_checkpointing=True,
         model_path=None,
@@ -127,7 +128,6 @@ class VQ_VAE(BaseModel):
         self.val_interval = 1 if early_stopping_patience else val_interval
         self.early_stopping_patience = early_stopping_patience
         self.n_example_images = n_example_images
-        self.device = device
         self.multiple_devices = multiple_devices
         self.use_checkpointing = use_checkpointing
         self.dtype = dtype
@@ -297,7 +297,6 @@ class TransformerDecoder_VQVAE(BaseModel):
         val_interval=10,
         early_stopping_patience=float('inf'),  # stop training after this many  training steps of not improving val loss
         dtype=torch.float32,
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         multiple_devices=False,
         model_path=None
     ):
@@ -315,7 +314,6 @@ class TransformerDecoder_VQVAE(BaseModel):
 
         self.val_interval = val_interval
         self.early_stopping_patience = early_stopping_patience
-        self.device = device
         self.multiple_devices = multiple_devices
         self.ce_loss = CrossEntropyLoss()
         self.calculate_intermediate_reconstructions = False
