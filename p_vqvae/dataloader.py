@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import torch
 
 import nibabel as nib
 from monai.data import DataLoader
@@ -68,6 +69,33 @@ def get_augmentation():
     return transforms
 
 
+def load_batches(loader, n_batches):
+    """Return n_batches of batches given loader."""
+    ii = 0
+    while True:
+        for batch in loader:
+            yield batch
+            ii += 1
+            if ii == n_batches:
+                return
+
+
+def float32_to_uint8(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts a tensor from float32 to uint8.
+    Assumes input tensor is in range [0, 1].
+    """
+    return (tensor * 255).clamp(0, 255).to(torch.uint8)
+
+
+def uint8_to_float32(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts a tensor from uint8 to float32.
+    Output will be in the range [0, 1].
+    """
+    return tensor.to(torch.float32) / 255.0
+
+
 class DataSet(DataSet_monai):
     """
     A generic dataset tailored to ATLAS v2.
@@ -111,6 +139,11 @@ class DataSet(DataSet_monai):
         if self.transform:
             image = self.transform(image)
 
+        if self.dtype == torch.float32 and image.dtype == torch.uint8:
+            image = uint8_to_float32(image)
+        elif self.dtype == torch.uint8 and image.dtype == torch.float32:
+            image = float32_to_uint8(image)
+        
         return {"image": image}
 
     def get_images(self, range_indices: list):
