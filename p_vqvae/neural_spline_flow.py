@@ -34,6 +34,8 @@ train_loader_kwargs = {
 model_params = {
     "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
     "device": "cuda",
+    "eval_interval": 10,  # after how many steps evaluate on validation set
+    "early_stopping": 3,  # after how many evaluation steps stop the training
     "steps_per_level": 10,
     "levels": 2,  # increase for non-downsampled dataset
     "multi_scale": True,
@@ -64,15 +66,8 @@ coupling_transform = {
     "resnet_batchnorm": True,
     "dropout_prob": 0.,
 }
-intervals_ = {
-        'save': 1000,
-        'sample': 1000,
-        'eval': 50,
-        'reconstruct': 1000,
-        'log': 50
-    }
-nsf_params = {**model_params, **optimization, **coupling_transform, "spline_parameters": _spline_params, "intervals":
-              intervals_}
+
+nsf_params = {**model_params, **optimization, **coupling_transform, "spline_parameters": _spline_params}
 
 
 class Conv3dSameSize(torch.nn.Conv3d):
@@ -488,7 +483,9 @@ class NSF(BaseModel):
         steps_per_level=10,
         levels=3,
         multi_scale=True,  # what is multiscale ?
-        actnorm=True,
+        actnorm=False,
+        eval_interval=10,  # after how many steps evaluate on validation set
+        early_stopping=3,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 
         # Optimization
@@ -508,7 +505,6 @@ class NSF(BaseModel):
         resnet_batchnorm=True,
         dropout_prob=0.,
 
-        intervals=None,
         spline_parameters: dict = None,
 
     ):
@@ -524,10 +520,12 @@ class NSF(BaseModel):
         self.actnorm = actnorm
         self.device = device
 
-        # optimization
+        # optimization, training params
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.cosine_annealing = cosine_annealing
+        self.eval_interval = eval_interval
+        self.early_stopping_patience = early_stopping
         self.eta_min = eta_min
         self.warmup_fraction = warmup_fraction
         self.num_steps = num_steps
@@ -545,7 +543,6 @@ class NSF(BaseModel):
         self.flow_checkpoint = None
         self.optimizer_checkpoint = None
         self.start_step = 0
-        self.intervals = intervals_ if intervals is None else intervals
 
         self.model = self.create_flow()
         super().__init__(self.model, model_path=model_path, base_filename="NSF", device=device)
@@ -613,6 +610,8 @@ class NSF(BaseModel):
         return mct
 
     def train(self, **save_kwargs):
+        evals_without_improvement = 0
+        best_model_weights = None
         c, h, w, d = self.shape[1:]
         self.model = self.model.to(self.device)
 
@@ -669,13 +668,28 @@ class NSF(BaseModel):
             if scheduler is not None:
                 scheduler.step()
 
-            if step > 0 and step % self.intervals['eval'] == 0 and (self.val_loader is not None):
+            if step > 0 and step % self.eval_interval == 0 and (self.val_loader is not None):
                 val_log_prob = self.eval_log_density()
                 val_log_prob = val_log_prob[0].item()  # mean loss for all validation batches
 
                 if best_val_log_prob is None or val_log_prob > best_val_log_prob:
                     best_val_log_prob = val_log_prob
-                    self.save(best_val="1", **save_kwargs)
+                    best_model_weights = self.model.state_dict()
+                    evals_without_improvement = 0
+                else:
+                    evals_without_improvement += 1
+
+                # early stopping
+                if evals_without_improvement >= self.early_stopping_patience:
+                    print(f"Early stopping at step {step + 1}.")
+
+                    if best_model_weights:
+                        print("Loading best model weights so far.")
+                        self.model.load_state_dict(best_model_weights)
+
+                    break
+
+        self.save(best_val="1", **save_kwargs)
 
     def eval_log_density(self, num_batches=None):
         c, h, w, d = self.shape[1:]
