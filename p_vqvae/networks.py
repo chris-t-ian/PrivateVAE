@@ -14,13 +14,19 @@ from monai.inferers import VQVAETransformerInferer
 
 class BaseModel:
     def __init__(self, model, model_path=None, base_filename="",
-                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),):
+                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                 seed=None):
         self.trained_flag = False
         self.model = model
         self.model_path = model_path
         self.base_filename = base_filename
         self.full_path = None
         self.device = device
+
+        if seed and "cuda" in self.device:
+            torch.cuda.manual_seed(seed)
+        elif seed and self.device == "cpu":
+            torch.manual_seed(seed)
 
     def get_full_path(self, **kwargs):
         filename = self.base_filename
@@ -109,6 +115,7 @@ class VQ_VAE(BaseModel):
         multiple_devices=True,
         use_checkpointing=True,
         model_path=None,
+        seed=None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -140,7 +147,7 @@ class VQ_VAE(BaseModel):
         self.intermediary_images = []
         self.final_reconstructions = None
         self.images = None
-        super().__init__(self.model, model_path, base_filename="VQVAE")
+        super().__init__(self.model, model_path, base_filename="VQVAE", seed=seed)
 
     def _init_model(self):
         model = VQVAE(
@@ -298,7 +305,8 @@ class TransformerDecoder_VQVAE(BaseModel):
         early_stopping_patience=float('inf'),  # stop training after this many  training steps of not improving val loss
         dtype=torch.float32,
         multiple_devices=False,
-        model_path=None
+        model_path=None,
+        seed=None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -337,7 +345,7 @@ class TransformerDecoder_VQVAE(BaseModel):
         self.transformer_model = self._init_model()
         self.optimizer = torch.optim.Adam(params=self.transformer_model.parameters(), lr=self.lr)
 
-        super().__init__(self.transformer_model, model_path, base_filename="transformer_VQVAE")
+        super().__init__(self.transformer_model, model_path, base_filename="transformer_VQVAE", seed=seed)
 
     def _init_model(self):
         test_scan = next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)
