@@ -101,6 +101,19 @@ class ConvNet(torch.nn.Module):
         return self.net.forward(x)
 
 
+class _CompositeTransform(CompositeTransform):
+    @staticmethod
+    def _cascade(inputs, funcs, context):
+        batch_size = inputs.shape[0]
+        outputs = inputs
+        total_logabsdet = inputs.new_zeros(batch_size)
+        for func in funcs:
+            outputs, logabsdet = func(outputs, context)
+            logabsdet = logabsdet.to(device=total_logabsdet.device)
+            total_logabsdet += logabsdet
+        return outputs, total_logabsdet
+
+
 def create_transform_step(num_channels, hidden_channels, actnorm, spline_params, coupling_layer_type,
                           use_resnet, dropout_prob, steps_per_level=None):
     if use_resnet:
@@ -141,7 +154,7 @@ def create_transform_step(num_channels, hidden_channels, actnorm, spline_params,
         coupling_layer
     ])
 
-    return CompositeTransform(step_transforms)
+    return _CompositeTransform(step_transforms)
 
 
 class SqueezeTransform(Transform):
@@ -568,7 +581,7 @@ class NSF(BaseModel):
                 transform_pipeline = [squeeze_transform]
                 transform_pipeline.extend(transform_step)
                 transform_pipeline.append(OneByOneConvolution(c))
-                transform_level = CompositeTransform(transform_pipeline)
+                transform_level = _CompositeTransform(transform_pipeline)
 
                 new_shape = mct.add_transform(transform_level, (c, h, w, d))
                 if new_shape:  # If not last layer
@@ -587,14 +600,14 @@ class NSF(BaseModel):
                 transform_pipeline = [squeeze_transform]
                 transform_pipeline.extend(transform_step)
                 transform_pipeline.append(OneByOneConvolution(c))
-                transform_level = CompositeTransform(transform_pipeline)
+                transform_level = _CompositeTransform(transform_pipeline)
                 all_transforms.append(transform_level)
 
             all_transforms.append(ReshapeTransform(
                 input_shape=(c, h, w, d),
                 output_shape=(c * h * w * d,)
             ))
-            mct = CompositeTransform(all_transforms)
+            mct = _CompositeTransform(all_transforms)
 
         # Inputs to the model in [0, 2 ** num_bits]
         return mct
