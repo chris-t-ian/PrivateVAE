@@ -493,14 +493,14 @@ class TransformerDecoder_VQVAE(BaseModel):
 
 
 def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, transformer_training_kwargs: dict,
-                                saving_kwargs: dict):
+                                saving_kwargs: dict, seed=None):
 
-    vqvae = VQ_VAE(train_loader, **vqvae_training_kwargs)
+    vqvae = VQ_VAE(train_loader, seed=seed, **vqvae_training_kwargs)
     vqvae.train()
 
     vqvae.save_or_load(**saving_kwargs)
 
-    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, **transformer_training_kwargs)
+    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, seed=seed **transformer_training_kwargs)
     t_vqvae.train()
     t_vqvae.save_or_load(**saving_kwargs)
 
