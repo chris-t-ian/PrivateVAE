@@ -35,7 +35,7 @@ model_params = {
     "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
     "device": "cuda",
     "eval_interval": 10,  # after how many steps evaluate on validation set
-    "early_stopping": 3,  # after how many evaluation steps stop the training
+    "early_stopping": 4,  # after how many evaluation steps stop the training
     "steps_per_level": 10,
     "levels": 2,  # increase for non-downsampled dataset
     "multi_scale": True,
@@ -55,8 +55,7 @@ optimization = {
     "cosine_annealing": False,
     "eta_min": 0.,
     "warmup_fraction": 0.,
-    "num_steps": 10000,
-    "temperatures": [0.5, 0.75, 1.],
+    "num_steps": 5000,
 }
 coupling_transform = {
     "coupling_layer_type": 'rational_quadratic_spline',
@@ -110,7 +109,7 @@ class _CompositeTransform(CompositeTransform):
 
 
 def create_transform_step(num_channels, hidden_channels, actnorm, spline_params, coupling_layer_type,
-                          use_resnet, dropout_prob, steps_per_level=None):
+                          use_resnet, dropout_prob, num_bins, steps_per_level=None):
     if use_resnet:
         raise NotImplementedError
     else:
@@ -130,7 +129,7 @@ def create_transform_step(num_channels, hidden_channels, actnorm, spline_params,
             transform_net_create_fn=create_convnet,
             tails='linear',
             tail_bound=spline_params['tail_bound'],
-            num_bins=spline_params['num_bins'],
+            num_bins=num_bins,
             apply_unconditional_transform=spline_params['apply_unconditional_transform'],
             min_bin_width=spline_params['min_bin_width'],
             min_bin_height=spline_params['min_bin_height'],
@@ -493,9 +492,8 @@ class NSF(BaseModel):
         learning_rate=1e-4,
         cosine_annealing=False,
         eta_min=0.,
-        warmup_fraction=0.,
         num_steps=100000,
-        temperatures=None,
+        num_bins=4,
 
         # coupling_transform
         coupling_layer_type='rational_quadratic_spline',
@@ -507,6 +505,7 @@ class NSF(BaseModel):
 
         spline_parameters: dict = None,
 
+        seed=None
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -527,11 +526,10 @@ class NSF(BaseModel):
         self.eval_interval = eval_interval
         self.early_stopping_patience = early_stopping
         self.eta_min = eta_min
-        self.warmup_fraction = warmup_fraction
         self.num_steps = num_steps
-        self.temperatures = [0.5, 0.75, 1.] if temperatures is None else temperatures
 
         # Coupling transform net
+        self.num_bins = num_bins
         self.coupling_layer_type = coupling_layer_type
         self.hidden_channels = hidden_channels
         self.use_resnet = use_resnet
@@ -545,7 +543,7 @@ class NSF(BaseModel):
         self.start_step = 0
 
         self.model = self.create_flow()
-        super().__init__(self.model, model_path=model_path, base_filename="NSF", device=device)
+        super().__init__(self.model, model_path=model_path, base_filename="NSF", device=device, seed=seed)
 
     def create_flow(self):
         c, h, w, d = self.shape[1:]
@@ -562,17 +560,16 @@ class NSF(BaseModel):
     def create_transform(self, c, h, w, d,):
         if not isinstance(self.hidden_channels, list):
             self.hidden_channels = [self.hidden_channels] * self.levels
-            print("hidden channels, ", self.hidden_channels)
 
         if self.multi_scale:
             mct = MultiscaleCompositeTransform(num_transforms=self.levels)
             for level, level_hidden_channels in zip(range(self.levels), self.hidden_channels):
                 squeeze_transform = SqueezeTransform()
                 c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
-                print("channels: ", c)
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
-                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob)
+                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob,
+                                                        self.num_bins)
                                   for _ in range(self.steps_per_level)]
 
                 transform_pipeline = [squeeze_transform]
@@ -591,7 +588,8 @@ class NSF(BaseModel):
                 c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
-                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob)
+                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob,
+                                                        self.num_bins)
                                   for _ in range(self.steps_per_level)]
 
                 transform_pipeline = [squeeze_transform]
@@ -609,7 +607,7 @@ class NSF(BaseModel):
         # Inputs to the model in [0, 2 ** num_bits]
         return mct
 
-    def train(self, **save_kwargs):
+    def train(self, clear_mem=False, **save_kwargs):
         evals_without_improvement = 0
         best_model_weights = None
         c, h, w, d = self.shape[1:]
@@ -624,22 +622,18 @@ class NSF(BaseModel):
             optimizer.load_state_dict(torch.load(self.optimizer_checkpoint))
 
         if self.cosine_annealing:
-            if self.warmup_fraction == 0.:
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer=optimizer,
-                    T_max=self.num_steps,
-                    last_epoch=-1 if self.start_step == 0 else self.start_step,
-                    eta_min=self.eta_min
-                )
-            else:
-                raise NotImplementedError
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optimizer,
+                T_max=self.num_steps,
+                last_epoch=-1 if self.start_step == 0 else self.start_step,
+                eta_min=self.eta_min
+            )
         else:
             scheduler = None
 
         best_val_log_prob = None
         start_time = None
         num_batches = self.num_steps - self.start_step
-        print("number of batches: ", num_batches)
 
         progress_bar = tqdm(enumerate(load_batches(loader=self.train_loader, n_batches=num_batches)),
                             total=num_batches, ncols=110)
@@ -689,7 +683,10 @@ class NSF(BaseModel):
 
                     break
 
-        self.save(best_val="1", **save_kwargs)
+        # self.save(best_val="1", **save_kwargs)
+        if clear_mem and self.device in ["cuda", "cuda:0", "cuda:1"]:
+            torch.cuda.empty_cache()
+        return best_val_log_prob
 
     def eval_log_density(self, num_batches=None):
         c, h, w, d = self.shape[1:]
