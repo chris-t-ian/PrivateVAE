@@ -7,6 +7,8 @@ def check_and_remove_channel_dimension(x):
     if len(x.shape) == 5:
         assert x.shape[1] == 1, f"input file has {x.shape[1]} channels"
         return x[:, 0, :, :, :]
+    else:
+        return x
 
 
 def get3d_middle_slices(x):
