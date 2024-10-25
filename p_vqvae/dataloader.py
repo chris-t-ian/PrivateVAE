@@ -107,26 +107,13 @@ class DataSet(DataSet_monai):
 
     def __init__(
             self,
-            mode: str = "full",
-            root: str = None,
-            cache_path: str = None,
-            downsample: int = 1,
-            normalize: int = 1,
+            data,
             dtype: np.dtype = np.float16,
-            crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
-            padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
     ):
 
-        self.mode = mode
-        self.downsample = downsample
-        self.prefix = f"_{mode}_smpl{downsample}"
-        self.normalize = normalize
-        self.crop_size = crop
-        self.padding = padding
         self.dtype = dtype
         self.transform = get_augmentation()
-
-        self.data = self.__load__(root, cache_path)
+        self.data = data
         super().__init__(self.data)
 
     # overriding __len__ and __getitem__ methods of DataSet_monai
@@ -158,6 +145,78 @@ class DataSet(DataSet_monai):
             img = np.copy(self.data[range_indices[0] + i])
             images[i] = img
         return images
+
+    def get_data(self):
+        return self.data
+
+    def __load__(self):
+        NotImplementedError("Loading of data is not implemented.")
+
+
+class RawDataSet(DataSet):
+    def __init__(
+        self,
+        mode: str = "full",
+        root: str = os.getcwd(),
+        cache_path: str = None,
+        downsample: int = 1,
+        normalize: int = 1,
+        dtype: np.dtype = np.float16,
+        crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
+        padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
+    ):
+        self.mode = mode
+        self.root = root
+        self.cache_path = cache_path
+        self.downsample = downsample
+        self.prefix = f"_{mode}_smpl{downsample}"
+        self.normalize = normalize
+        self.crop_size = crop
+        self.padding = padding
+        self.dtype = dtype
+        self.transform = get_augmentation()
+        self.data = self.__load__()
+
+        super().__init__(self.data, dtype)
+
+    def __load__(self) -> np.array:
+        """
+        Load data from parent_path and apply transforms. If initiated for the first time load all T1 files.
+
+        :arg
+            parent_path: path were T1.nii.gz images are stored
+            cache_path: creates a stored .npy file for faster loading time at the specified path
+        """
+
+        cached_file = os.path.join(self.cache_path, 'ATLAS_2' + self.prefix + '.npy')
+        if os.path.isfile(cached_file) and self.cache_path:  # if file exists and cache path provided, load npy file
+            data = np.load(cached_file, mmap_mode='r')
+        else:
+            paths = self.collect_paths(self.root)
+            progress_bar = tqdm(total=len(paths), ncols=110, desc="Loading T1 images")  # initialise progress bar
+
+            # load first image to define shape
+            img = nib.load(paths[0], mmap=True)  # Use memory mapping
+            img = img.get_fdata()  # This will not load the entire file into memory
+            img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
+            shape = (len(paths), 1, img.shape[0], img.shape[1], img.shape[2])
+            data = np.empty(shape, dtype=self.dtype)
+
+            # Load images using memory mapping
+            for k, img_path in enumerate(paths):
+                img = nib.load(img_path, mmap=True)  # Use memory mapping
+                img = img.get_fdata().astype(self.dtype)  # This will not load the entire file into memory
+                img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
+                data[k, 0, :, :, :] = img[:, :, :]  # add channel dimension
+                progress_bar.update(1)
+
+            progress_bar.close()
+
+            if self.cache_path:
+                print(f"Storing transformed data as {cached_file}")
+                np.save(cached_file, data)
+
+        return data
 
     def collect_paths(
             self,
@@ -198,47 +257,17 @@ class DataSet(DataSet_monai):
 
         return img_paths
 
-    def __load__(self, parent_path: str, cache_path: str) -> np.array:
-        """
-        Load data from parent_path and apply transforms. If initiated for the first time load all T1 files.
 
-        :arg
-            parent_path: path were T1.nii.gz images are stored
-            cache_path: creates a stored .npy file for faster loading time at the specified path
-        """
+class SyntheticDataSet(DataSet):
+    def __init__(self, cached_file, dtype=np.float16):
+        self.cached_file = cached_file
+        self.data = self.__load__()
+        print("syn.shape: ", self.data.shape)
+        super().__init__(self.data, dtype)
 
-        cached_file = os.path.join(cache_path, 'ATLAS_2' + self.prefix + '.npy')
-        if os.path.isfile(cached_file) and cache_path:  # if file exists and cache path provided, load npy file
-            data = np.load(cached_file, mmap_mode='r')
-        else:
-            paths = self.collect_paths(parent_path)
-            progress_bar = tqdm(total=len(paths), ncols=110, desc="Loading T1 images")  # initialise progress bar
-
-            # load first image to define shape
-            img = nib.load(paths[0], mmap=True)  # Use memory mapping
-            img = img.get_fdata()  # This will not load the entire file into memory
-            img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
-            shape = (len(paths), 1, img.shape[0], img.shape[1], img.shape[2])
-            data = np.empty(shape, dtype=self.dtype)
-
-            # Load images using memory mapping
-            for k, img_path in enumerate(paths):
-                img = nib.load(img_path, mmap=True)  # Use memory mapping
-                img = img.get_fdata().astype(self.dtype)  # This will not load the entire file into memory
-                img = preprocess(img, self.downsample, self.normalize, self.crop_size, self.padding)
-                data[k, 0, :, :, :] = img[:, :, :]
-                progress_bar.update(1)
-
-            progress_bar.close()
-
-            if cache_path:
-                print(f"Storing transformed data as {cached_file}")
-                np.save(cached_file, data)
-
-        return data
-
-    def get_data(self):
-        return self.data
+    def __load__(self):
+        assert os.path.isfile(self.cached_file), f"Cached file {self.cached_file} does not exist."
+        return np.load(self.cached_file, mmap_mode='r')
 
 
 def get_train_val_loader(
