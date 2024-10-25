@@ -499,7 +499,8 @@ class TransformerDecoder_VQVAE(BaseModel):
                 generated_image = sample[0, 0].cpu().numpy()
                 generated_images.append(generated_image)
 
-        return np.stack(generated_images)
+        generated_images = np.stack(generated_images)
+        return np.expand_dims(generated_images, axis=1)
 
 
 def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, transformer_training_kwargs: dict,
