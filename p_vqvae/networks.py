@@ -13,20 +13,22 @@ from monai.inferers import VQVAETransformerInferer
 
 
 class BaseModel:
-    def __init__(self, model, model_path=None, base_filename="",
-                 device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-                 seed=None):
+    def __init__(self, model, model_path=None, base_filename="", device=None, seed=None):
         self.trained_flag = False
-        self.model = model
         self.model_path = model_path
         self.base_filename = base_filename
-        self.full_path = None
-        self.device = device
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        if seed and "cuda" in self.device:
-            torch.cuda.manual_seed(seed)
+        if seed and "cuda" in str(self.device):
+            torch.cuda.manual_seed(seed)  # set fixed seed
         elif seed and self.device == "cpu":
-            torch.manual_seed(seed)
+            torch.manual_seed(seed)  # set fixed seed
+        elif seed is None and "cuda" in str(self.device):
+            torch.cuda.seed_all()  # set fresh random seed
+        elif seed is None and self.device == "cpu":
+            torch.seed()  # set fresh random seed
+
+        self.model = model.to(self.device)
 
     def get_full_path(self, **kwargs):
         filename = self.base_filename
@@ -35,21 +37,24 @@ class BaseModel:
         filename += ".pth"
         return os.path.join(self.model_path, filename)
 
+    def model_exists(self, **kwargs):
+        return os.path.exists(self.get_full_path(**kwargs))
+
     def save_or_load(self, **kwargs):
         """If weights were saved previously, load them. If not, save them, but only if model was trained."""
-        self.full_path = self.get_full_path(**kwargs)
-        if os.path.exists(self.full_path) and not self.trained_flag:
+        if self.model_exists(**kwargs) and not self.trained_flag:
             self.load(**kwargs)
-        elif os.path.exists(self.full_path) and self.trained_flag:
-            response = input('The model you are trying to load has been trained. Overwrite existing weights? '
-                             '(y/n)\n')
-            if response in ["y", "Yes", "Y"]:
-                self.load(**kwargs)
-        elif not os.path.exists(self.full_path) and self.trained_flag:
+        elif self.model_exists(**kwargs) and self.trained_flag:
+            # response = input('The model you are trying to load has been trained. Overwrite existing weights? '
+            #                 '(y/n)\n')
+            # if response in ["y", "Yes", "Y"]:
+            #   self.load(**kwargs)
+            pass
+        elif not self.model_exists(**kwargs) and self.trained_flag:
             self.save(**kwargs)
         else:
-            warnings.warn(f"Model weights {self.full_path} does not exist. However, the model you are trying to save"
-                          f"does not appear to be trained.")
+            warnings.warn(f"Model weights {self.get_full_path(**kwargs)} does not exist. However, the model you are"
+                          f"trying to save does not appear to be trained.")
             response = input("Save untrained model weights?\n")
             if response in ["y", "Yes", "Y"]:
                 self.save(**kwargs)
@@ -62,11 +67,11 @@ class BaseModel:
             model_path: The base directory where the model will be saved.
             **kwargs: Additional keyword arguments representing hyperparameters.
         """
-        self.full_path = self.get_full_path(**kwargs)
+        full_path = self.get_full_path(**kwargs)
         if not os.path.exists(self.model_path):
             os.makedirs(self.model_path)
-        torch.save(self.model.state_dict(), self.full_path)
-        print(f"Model saved to {self.full_path}")
+        torch.save(self.model.state_dict(), full_path)
+        print(f"Model saved to {full_path}")
 
     def load(self, **kwargs):
         """
@@ -82,9 +87,9 @@ class BaseModel:
             state_dict = torch.load(full_path)
             self.model.load_state_dict(state_dict)
             self.trained_flag = True
-            print(f"Model loaded from {self.full_path}")
+            print(f"Model loaded from {full_path}")
         else:
-            print(f"Model file not found: {self.full_path}")
+            print(f"Model file not found: {full_path}")
 
 
 class VQ_VAE(BaseModel):
@@ -116,6 +121,7 @@ class VQ_VAE(BaseModel):
         use_checkpointing=True,
         model_path=None,
         seed=None,
+        device=None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -138,8 +144,6 @@ class VQ_VAE(BaseModel):
         self.multiple_devices = multiple_devices
         self.use_checkpointing = use_checkpointing
         self.dtype = dtype
-        self.model = self._init_model()
-        self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.reconstruction_loss = reconstruction_loss
         self.epoch_recon_loss_list = []
         self.epoch_quant_loss_list = []
@@ -147,7 +151,10 @@ class VQ_VAE(BaseModel):
         self.intermediary_images = []
         self.final_reconstructions = None
         self.images = None
-        super().__init__(self.model, model_path, base_filename="VQVAE", seed=seed)
+        model = self._init_model()
+        super().__init__(model, model_path, "VQVAE", device, seed)
+
+        self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
 
     def _init_model(self):
         model = VQVAE(
@@ -164,7 +171,6 @@ class VQ_VAE(BaseModel):
             use_checkpointing=self.use_checkpointing,
             commitment_cost=self.commitment_cost,
         )
-        model.to(self.device, dtype=self.dtype)
 
         # use all GPUS if available
         if self.multiple_devices and torch.cuda.is_available():
@@ -307,11 +313,13 @@ class TransformerDecoder_VQVAE(BaseModel):
         multiple_devices=False,
         model_path=None,
         seed=None,
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.vqvae_model = vqvae_model.model
         self.dtype = dtype
+        self.device = device
 
         # Transformer hyperparameters
         self.attn_layers_dim = attn_layers_dim
@@ -327,25 +335,23 @@ class TransformerDecoder_VQVAE(BaseModel):
         self.calculate_intermediate_reconstructions = False
         self.model_path = model_path
 
-        self.ordering = Ordering(
-            ordering_type=OrderingType.RASTER_SCAN.value,
-            spatial_dims=3,
-            dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
-                next(iter(train_loader))['image'].to(self.device, dtype=self.dtype)).shape[2:],
-        )
-
-        self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
-                        next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)).shape[2:]
-
         self.epoch_ce_loss_list = []
         self.val_ce_epoch_loss_list = []
         self.intermediary_images = []
 
         self.inferer = VQVAETransformerInferer()
-        self.transformer_model = self._init_model()
-        self.optimizer = torch.optim.Adam(params=self.transformer_model.parameters(), lr=self.lr)
-
-        super().__init__(self.transformer_model, model_path, base_filename="transformer_VQVAE", seed=seed)
+        transformer_model = self._init_model()
+        self.seed = seed
+        super().__init__(transformer_model, model_path, "transformer_VQVAE", device, seed)
+        self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
+        self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
+            next(iter(self.train_loader))['image'].to(device=device)).shape[2:]
+        self.ordering = Ordering(
+            ordering_type=OrderingType.RASTER_SCAN.value,
+            spatial_dims=3,
+            dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
+                next(iter(train_loader))['image'].to(device=device)).shape[2:],
+        )
 
     def _init_model(self):
         test_scan = next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)
@@ -378,7 +384,7 @@ class TransformerDecoder_VQVAE(BaseModel):
         self.vqvae_model.eval()
         total_start = time.time()
         for epoch in range(self.n_epochs):
-            self.transformer_model.train()
+            self.model.train()
             epoch_loss = 0
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
@@ -388,7 +394,7 @@ class TransformerDecoder_VQVAE(BaseModel):
                 self.optimizer.zero_grad(set_to_none=True)
 
                 logits, target, _ = self.inferer(
-                    images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
+                    images, self.vqvae_model, self.model, self.ordering, return_latent=True
                 )
                 logits = logits.transpose(1, 2)
 
@@ -408,7 +414,7 @@ class TransformerDecoder_VQVAE(BaseModel):
                 # early stopping
                 if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    best_model_weights = self.transformer_model.state_dict()  # Save best weights
+                    best_model_weights = self.model.state_dict()  # Save best weights
                     epochs_without_improvement = 0  # Reset counter if improvement is found
                 else:
                     epochs_without_improvement += 1
@@ -418,7 +424,7 @@ class TransformerDecoder_VQVAE(BaseModel):
 
                 if best_model_weights:
                     print("Loading best model weights so far.")
-                    self.transformer_model.load_state_dict(best_model_weights)
+                    self.model.load_state_dict(best_model_weights)
 
                 break
 
@@ -430,13 +436,13 @@ class TransformerDecoder_VQVAE(BaseModel):
         return val_loss
 
     def validate(self):
-        self.transformer_model.eval()
+        self.model.eval()
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
                 images = batch['image'].to(self.device, dtype=self.dtype)
                 logits, quantizations_target, _ = self.inferer(
-                    images, self.vqvae_model, self.transformer_model, self.ordering, return_latent=True
+                    images, self.vqvae_model, self.model, self.ordering, return_latent=True
                 )
                 logits = logits.transpose(1, 2)
 
@@ -446,7 +452,7 @@ class TransformerDecoder_VQVAE(BaseModel):
                 if val_step == 1 and self.calculate_intermediate_reconstructions:
                     sample = self.inferer.sample(
                         vqvae_model=self.vqvae_model,
-                        transformer_model=self.transformer_model,
+                        transformer_model=self.model,
                         ordering=self.ordering,
                         latent_spatial_dim=self.latent_spatial_dim,
                         starting_tokens=self.vqvae_model.num_embeddings
@@ -466,21 +472,25 @@ class TransformerDecoder_VQVAE(BaseModel):
         prediction = self.inferer.__call__(
             inputs=img,
             vqvae_model=self.vqvae_model,
-            transformer_model=self.transformer_model,
+            transformer_model=self.model,
             ordering=self.ordering,
         ).cpu()
         return prediction
 
     def create_synthetic_images(self, num_images=10, temperature=1.0):
         self.vqvae_model.eval()
-        self.transformer_model.eval()
+        self.model.eval()
         generated_images = []
+
+        seed_used = torch.initial_seed() if self.device == "cpu" else torch.cuda.initial_seed()
+        if self.seed is not None:
+            assert seed_used == self.seed, f"Used seed {seed_used} is different than set seed {self.seed}"
 
         with torch.no_grad():
             for i in range(num_images):
                 sample = self.inferer.sample(
                     vqvae_model=self.vqvae_model,
-                    transformer_model=self.transformer_model,
+                    transformer_model=self.model,
                     ordering=self.ordering,
                     latent_spatial_dim=self.latent_spatial_dim,
                     starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
@@ -496,12 +506,18 @@ def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, trans
                                 saving_kwargs: dict, seed=None):
 
     vqvae = VQ_VAE(train_loader, seed=seed, **vqvae_training_kwargs)
-    vqvae.train()
+    if vqvae.model_exists(**saving_kwargs):
+        print("vqvae model already saved")
+        vqvae.load(**saving_kwargs)
+    else:
+        vqvae.train()
+        vqvae.save(**saving_kwargs)
 
-    vqvae.save_or_load(**saving_kwargs)
-
-    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, seed=seed **transformer_training_kwargs)
-    t_vqvae.train()
-    t_vqvae.save_or_load(**saving_kwargs)
+    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, seed=seed, **transformer_training_kwargs)
+    if t_vqvae.model_exists(**saving_kwargs):
+        t_vqvae.load(**saving_kwargs)
+    else:
+        t_vqvae.train()
+        t_vqvae.save(**saving_kwargs)
 
     return t_vqvae
