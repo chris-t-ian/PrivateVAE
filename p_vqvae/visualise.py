@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from torch import Tensor, get_device
+from p_vqvae.utils import calculate_AUC
 
 
 def check_and_remove_channel_dimension(x):
@@ -103,11 +104,27 @@ def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.ar
     plt.show()
 
 
+def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None):
+    auc = calculate_AUC(tprs, fprs)
+    if label:
+        plt.plot(fprs, tprs, marker='.', label=f'{label} (AUC = {auc:.4f})')
+    else:
+        plt.plot(fprs, tprs, marker='.', label=f'AUC = {auc:.4f}')
 
+    if tprs2 and fprs2:
+        assert label and label2, "Specify labels."
+        auc = calculate_AUC(tprs2, fprs2)
+        plt.plot(fprs2, tprs2, marker='.', label=f'{label2} (AUC = {auc:.4f})')
 
+    if tprs3 and fprs3:
+        assert label3, "Specify label 3"
+        auc = calculate_AUC(tprs3, fprs3)
+        plt.plot(fprs3, tprs3, marker='.', label=f'{label3} (AUC = {auc:.4f})')
 
-
-
-
-
+    plt.plot([0, 1], [0, 1], linestyle='--', color='gray')  # Diagonal line for random chance
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.legend(loc='lower right')
+    plt.grid()
+    plt.show()
 
