@@ -2,7 +2,6 @@ from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader
 from p_vqvae.networks import train_transformer_and_vqvae
 from p_vqvae.neural_spline_flow import OptimizedNSF
 from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
-from p_vqvae.visualise import show_roc_curve
 import numpy as np
 import random
 import torch
@@ -164,9 +163,8 @@ class AdversaryDOMIAS:
         # train model on raw and on synthetic dataset and calculate log densities for each target
         self.log_p_S, self.log_p_R = self.calculate_log_densities()
         self.tprs, self.fprs = self.roc_curve()
-        show_roc_curve(self.tprs, self.fprs)
+
         print("auc: ", calculate_AUC(self.tprs, self.fprs))
-        # infer membership p_S/P_R = exp(log_P_S - log_P_R)
 
     def sample_adversary_ids(self, n):
         random.seed()  # fresh seed
@@ -227,6 +225,9 @@ class AdversaryDOMIAS:
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_raw.device)
             log_p_r.append(nsf_raw.eval_log_density(target).item())
+
+        if "cuda" in str(nsf_raw.device):
+            torch.cuda.empty_cache()
 
         return np.array(log_p_s, dtype=np.float64), np.array(log_p_r, dtype=np.float64)
 
