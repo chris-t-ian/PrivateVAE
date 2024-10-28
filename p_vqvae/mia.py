@@ -1,78 +1,20 @@
 from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader
 from p_vqvae.networks import train_transformer_and_vqvae
 from p_vqvae.neural_spline_flow import OptimizedNSF
-from p_vqvae.utils import subset_to_sha256_key
+from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
+from p_vqvae.visualise import show_roc_curve
 import numpy as np
 import random
 import torch
 import os
 
-# don't forget to clear model outputs folder before implementing
-# also check kwargs before implementation
-TEST_MODE = True  # turn off for real attack
-
-N = 32  # number of shadow models
+N = 32  # number of shadow models for LiRA attack
 n_atlas = 955
 n_train = n_atlas // 2  # amount of images for the challenger and the adversary models. ATLAS v2 dataset n = 955
 
 assert N % 2 == 0, "Make sure to give an even N. Else the distribution of targets is uneven."
 
 include_targets_in_reference_dataset = None  # either True, False or None (=included at random)
-
-if TEST_MODE:
-    epochs_vqvae = 1
-    epochs_transformer = 1
-    downsample = 4
-    m_syn_images = 2
-    n_targets = 5
-else:
-    epochs_vqvae = 100
-    epochs_transformer = 50
-    downsample = 1
-    m_syn_images = n_train
-    n_targets = 100
-
-data_kwargs = {
-    "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
-    "cache_path": '/home/chrsch/P_VQVAE/data/cache/',
-    "downsample": downsample,
-    "normalize": 1,
-    "crop": ((8, 9), (12, 13), (0, 9)),
-    "padding": ((1, 2), (0, 0), (1, 2))}
-train_loader_kwargs = {
-    "batch_size": 1,
-    "augment_flag": True,
-    "num_workers": 2
-}
-nsf_train_loader_kwargs = {
-    "batch_size": 1,
-    "augment_flag": False,
-    "num_workers": 1
-}
-training_vqvae_kwargs = {
-    "n_epochs": epochs_vqvae,
-    "multiple_devices": False,
-    "dtype": torch.float32,
-    "use_checkpointing": True,
-    "num_embeddings": 256,
-    "embedding_dim": 32,
-    "num_res_layers": 2,
-    "num_res_channels": (256, 256),
-    "downsample_parameters": ((2, 4, 1, 1), (2, 4, 1, 1)),
-    "upsample_parameters": ((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira"
-}
-training_transformer_kwargs = {
-    "n_epochs": epochs_transformer,
-    "attn_layers_dim": 96,
-    "attn_layers_depth": 12,
-    "attn_layers_heads": 8,
-    "lr": 5e-4,
-    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira"
-}
-
-
-# TODO: Create function that takes model checks if synthetic data already exist. If yes, return mmap. If not create data
 
 
 class ChallengerRawDataSet(RawDataSet):
@@ -95,7 +37,8 @@ class ChallengerRawDataSet(RawDataSet):
         """Return length of challenger dataset instead of the size of the whole data distribution."""
         return len(self.challenger_ids)
 
-    def sample_challenger_dataset(self, seed):
+    @staticmethod
+    def sample_challenger_dataset(seed):
         """Take entire (memory mapped) dataset and sample n_train images. Return sampled dataset in random order and the
         rest of the dataset distribution without the challenger dataset."""
         random.seed(seed)  # fixed seed for sampling datasets
@@ -107,14 +50,22 @@ class ChallengerRawDataSet(RawDataSet):
 
 
 class Challenger:
-    def __init__(self, m_c):
+    def __init__(
+            self,
+            m_c,
+            raw_data_kwargs: dict,
+            vqvae_train_loader_kwargs: dict,
+            training_vqvae_kwargs: dict,
+            training_transformer_kwargs: dict,
+            n_targets=n_atlas
+    ):
         self.m_c = m_c
         self.data_seed = 420
         self.training_seed = 69
 
         # sample challenger dataset using fixed seed
-        challenger_ds = ChallengerRawDataSet(self.data_seed, **data_kwargs)
-        challenger_train_loader = get_train_loader(challenger_ds, **train_loader_kwargs)
+        challenger_ds = ChallengerRawDataSet(self.data_seed, **raw_data_kwargs)
+        challenger_train_loader = get_train_loader(challenger_ds, **vqvae_train_loader_kwargs)
 
         # train challenger model, train VQVAE and transformer decoder at once using a fixed seed
         t_vqvae = train_transformer_and_vqvae(challenger_train_loader, training_vqvae_kwargs,
@@ -143,21 +94,26 @@ class Challenger:
          Return indices of targets and their membership label."""
         random.seed()  # fresh seed
 
-        target_ids = []
-        target_memberships = [random.getrandbits(1) for _ in range(_n)]
+        if _n >= n_atlas:  # take all ids as targets
+            target_ids = [id for id in range(0, n_atlas)]
+            random.shuffle(target_ids)
+            target_memberships = [1 if id in self.challenger_ids else 0 for id in target_ids]
+        else:
+            target_ids = []
+            target_memberships = [random.getrandbits(1) for _ in range(_n)]
 
-        challenger_ids = self.challenger_ids.copy()          # create a copy of ids so that it can be changed
-        non_challenger_ids = self.non_challenger_ids.copy()  # without changing the class attribute self. _ids
+            challenger_ids = self.challenger_ids.copy()          # create a copy of ids so that it can be changed
+            non_challenger_ids = self.non_challenger_ids.copy()  # without changing the class attribute self. _ids
 
-        for b in target_memberships:
-            if b == 1:
-                target_id = random.sample(challenger_ids, 1)[0]
-                challenger_ids.remove(target_id)  # remove from list to avoid drawing the same target again
-            else:
-                target_id = random.sample(non_challenger_ids, 1)[0]
-                non_challenger_ids.remove(target_id)  # remove from list to avoid drawing the same target again
+            for b in target_memberships:
+                if b == 1:
+                    target_id = random.sample(challenger_ids, 1)[0]
+                    challenger_ids.remove(target_id)  # remove from list to avoid drawing the same target again
+                else:
+                    target_id = random.sample(non_challenger_ids, 1)[0]
+                    non_challenger_ids.remove(target_id)  # remove from list to avoid drawing the same target again
 
-            target_ids.append(target_id)
+                target_ids.append(target_id)
 
         return target_ids, target_memberships
 
@@ -186,11 +142,14 @@ class AdversaryRawDataSet(RawDataSet):
         image = np.copy(self.data[id])
         return {"image": image}
 
+
 class AdversaryDOMIAS:
     def __init__(
             self,
             _challenger: Challenger,
-            background_knowledge: float = 0.0
+            data_kwargs: dict,
+            nsf_train_loader_kwargs: dict,
+            background_knowledge: float = 0.0,
     ):
         self.synthetic_train_loader = get_train_loader(_challenger.challenger_syn_dataset, **nsf_train_loader_kwargs)
         self.background_knowledge = background_knowledge
@@ -204,7 +163,9 @@ class AdversaryDOMIAS:
 
         # train model on raw and on synthetic dataset and calculate log densities for each target
         self.log_p_S, self.log_p_R = self.calculate_log_densities()
-        self.infer_membership_f_x()
+        self.tprs, self.fprs = self.roc_curve()
+        show_roc_curve(self.tprs, self.fprs)
+        print("auc: ", calculate_AUC(self.tprs, self.fprs))
         # infer membership p_S/P_R = exp(log_P_S - log_P_R)
 
     def sample_adversary_ids(self, n):
@@ -232,9 +193,6 @@ class AdversaryDOMIAS:
         random.shuffle(adversary_ids)
         return adversary_ids
 
-    def train_nsf(self, train_ds):
-        nsf = OptimizedNSF(train_ds)
-
     def calculate_log_densities(self):
         nsf_syn = OptimizedNSF(self.synthetic_train_loader)
         syn_saving_keys = {"adversary":"DOMIAS", "syn":"", "sha":f"{subset_to_sha256_key(self.challenger_ids)}"}
@@ -245,12 +203,12 @@ class AdversaryDOMIAS:
             nsf_syn.save(**syn_saving_keys)
 
         # for every target x get p_S(x) from the nsf-density estimator
-        log_p_S = []
+        log_p_s = []
         for target_id in self.target_ids:
             target = self.adversary_ds.getitem_by_id(target_id)['image']
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_syn.device)
-            log_p_S.append(nsf_syn.eval_log_density(target).item())
+            log_p_s.append(nsf_syn.eval_log_density(target).item())
 
         if "cuda" in str(nsf_syn.device):
             torch.cuda.empty_cache()
@@ -263,46 +221,44 @@ class AdversaryDOMIAS:
             nsf_raw.train(**raw_saving_keys)
             nsf_raw.save(**raw_saving_keys)
 
-        log_p_R = []
+        log_p_r = []
         for target_id in self.target_ids:
             target = self.adversary_ds.getitem_by_id(target_id)['image']
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_raw.device)
-            log_p_R.append(nsf_raw.eval_log_density(target).item())
+            log_p_r.append(nsf_raw.eval_log_density(target).item())
 
-        # p_S/P_R = exp(p_S - p_R)
-        print("log_p_S: ", log_p_S)
-        print("log_p_R: ", log_p_R)
-        return np.array(log_p_S, dtype=np.float64), np.array(log_p_R, dtype=np.float64)
+        return np.array(log_p_s, dtype=np.float64), np.array(log_p_r, dtype=np.float64)
 
     def infer_membership_f_x(self, gamma=1):
-        diffs = self.log_p_S - self.log_p_R
-        print("diff: ", diffs)
+        diffs = self.log_p_S - self.log_p_R  # f(x) = log(x)
         infered_memberships = []
         for diff in diffs:
-            if diff >= gamma:
+            if diff <= gamma:
                 b = 1
             else:
                 b = 0
             infered_memberships.append(b)
         return infered_memberships
-        # ratio = np.exp(self.log_p_S - self.log_p_R)
 
     def roc_curve(self):
-        for gamma in range(-20000, 0, 1000):
-            inferred_memberships = self.infer_membership_f_x()
+        tprs = []
+        fprs = []
+        true_memberships = np.array(self.true_memberships)
+        for gamma in range(-220000, -100000, 1000):
+            inferred_memberships = np.array((self.infer_membership_f_x(gamma)))
 
-            tp = np.sum((self.true_memberships == 1) & (inferred_memberships == 1))
-            tn = np.sum((self.true_memberships == 0) & (inferred_memberships == 0))
-            fp = np.sum((self.true_memberships == 0) & (inferred_memberships == 1))
-            fn = np.sum((self.true_memberships == 1) & (inferred_memberships == 0))
+            tp = np.sum((true_memberships == 1) & (inferred_memberships == 1))
+            tn = np.sum((true_memberships == 0) & (inferred_memberships == 0))
+            fp = np.sum((true_memberships == 0) & (inferred_memberships == 1))
+            fn = np.sum((true_memberships == 1) & (inferred_memberships == 0))
 
             tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-            #fpr = fp
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+            tprs.append(tpr)
+            fprs.append(fpr)
 
-
-
-
+        return tprs, fprs
 
 
 class AdversaryLiRA:
@@ -321,15 +277,14 @@ class AdversaryLiRA:
         # remove targets from id list to avoid unintended (double) membership.
         self.challenger_ids = _challenger.challenger_ids
         self.non_challenger_ids = _challenger.non_challenger_ids
-        self.challenger_ids_without_targets = [id for id in self.challenger_ids if not id in self.target_ids]
-        self.non_challenger_ids_without_targets = [id for id in self.non_challenger_ids if not id in self.target_ids]
+        self.challenger_ids_without_targets = [id for id in self.challenger_ids if id not in self.target_ids]
+        self.non_challenger_ids_without_targets = [id for id in self.non_challenger_ids if id not in self.target_ids]
         random.shuffle(self.non_challenger_ids_without_targets)
 
         # sample adversary shadow dataset ids
         self.adversary_ids = self.sample_shadow_ids(background_knowledge=self.background_knowledge)
 
         # for every target, define an in- or out-dataset.
-        # TODO: should training begin in this class?
         # self.adversary_datasets = self.get_adversary_datasets(**dataset_kwargs)
 
     def sample_shadow_ids(self, background_knowledge=0.0):
@@ -447,11 +402,3 @@ class AdversaryLiRA:
     def calculate_likelihood_ratio(self):
         pass
 
-
-if __name__ == "__main__":
-    challenger = Challenger(3)
-    print(challenger.challenger_ids)
-    adversary = AdversaryDOMIAS(challenger, background_knowledge=1.0)
-    print(challenger.target_ids)
-    print(challenger.target_memberships)
-    # adversary = AdversaryLiRA(challenger)
