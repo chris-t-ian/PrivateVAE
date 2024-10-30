@@ -54,12 +54,12 @@ def get_augmentation():
         # Step 4: Thresholding to ensure values are within [0, 1.0]
         ThresholdIntensity(
             threshold=0.0,  # Min value
-            above=False,  # Values above the threshold will be set to 0
-            cval=0.0  # Clipping value
+            above=True,  # Values above the threshold will be set to 0
+            cval=0.0,  # Clipping value
         ),
         ThresholdIntensity(
             threshold=1.0,  # Max value
-            above=True,  # Values above the threshold will be set to 1
+            above=False,  # Values above the threshold will be set to 1
             cval=1.0  # Clipping value
         ),
 
@@ -262,7 +262,6 @@ class SyntheticDataSet(DataSet):
     def __init__(self, cached_file, dtype=np.float16):
         self.cached_file = cached_file
         self.data = self.__load__()
-        print("syn.shape: ", self.data.shape)
         super().__init__(self.data, dtype)
 
     def __load__(self):
