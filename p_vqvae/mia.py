@@ -1,4 +1,4 @@
-from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader
+from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader, get_train_val_loader
 from p_vqvae.networks import train_transformer_and_vqvae
 from p_vqvae.neural_spline_flow import OptimizedNSF
 from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
@@ -67,17 +67,19 @@ class Challenger:
         challenger_train_loader = get_train_loader(challenger_ds, **vqvae_train_loader_kwargs)
 
         # train challenger model, train VQVAE and transformer decoder at once using a fixed seed
-        t_vqvae = train_transformer_and_vqvae(challenger_train_loader, training_vqvae_kwargs,
+        self.t_vqvae = train_transformer_and_vqvae(challenger_train_loader, training_vqvae_kwargs,
                                               training_transformer_kwargs,
                                               saving_kwargs={"challenger": 1, "seed": self.training_seed},
-                                              seed=self.training_seed)
+                                              seed=self.training_seed,
+                                              )
+
 
         # load m synthetic datapoints or generate and save them
         path_to_syn_data = os.path.join(training_transformer_kwargs["model_path"], "synthetic_data")
         path_to_syn_data = os.path.join(path_to_syn_data, f"challenger_syn_seed{self.training_seed}_2.npy")
 
         if not os.path.isfile(path_to_syn_data):
-            challenger_syn_imgs = t_vqvae.create_synthetic_images(self.m_c)
+            challenger_syn_imgs = self.t_vqvae.create_synthetic_images(self.m_c)
             np.save(path_to_syn_data, challenger_syn_imgs)
 
         self.challenger_syn_dataset = SyntheticDataSet(path_to_syn_data)
@@ -150,7 +152,9 @@ class AdversaryDOMIAS:
             nsf_train_loader_kwargs: dict,
             background_knowledge: float = 0.0,
     ):
-        self.synthetic_train_loader = get_train_loader(_challenger.challenger_syn_dataset, **nsf_train_loader_kwargs)
+        # self.synthetic_train_loader = get_train_loader(_challenger.challenger_syn_dataset, **nsf_train_loader_kwargs)
+        self.synthetic_train_loader, self.synthetic_val_loader = get_train_val_loader(
+            _challenger.challenger_syn_dataset, **nsf_train_loader_kwargs)
         self.background_knowledge = background_knowledge
         self.challenger_ids = _challenger.challenger_ids
         self.non_challenger_ids = _challenger.non_challenger_ids
@@ -158,10 +162,12 @@ class AdversaryDOMIAS:
         self.true_memberships = _challenger.target_memberships
         self.adversary_ids = self.sample_adversary_ids(n=len(self.challenger_ids))
         self.adversary_ds = AdversaryRawDataSet(self.adversary_ids, **data_kwargs)
-        self.adversary_train_loader = get_train_loader(self.adversary_ds, **nsf_train_loader_kwargs)
+        # self.adversary_train_loader = get_train_loader(self.adversary_ds, **nsf_train_loader_kwargs)
+        self.adversary_train_loader, self.adversary_val_loader = get_train_val_loader(self.adversary_ds,
+                                                                                      **nsf_train_loader_kwargs)
 
         # train model on raw and on synthetic dataset and calculate log densities for each target
-        self.log_p_S, self.log_p_R = self.calculate_log_densities()
+        self.log_p_s, self.log_p_r = self.calculate_log_densities()
         self.tprs, self.fprs = self.roc_curve()
 
         print("auc: ", calculate_AUC(self.tprs, self.fprs))
@@ -192,7 +198,7 @@ class AdversaryDOMIAS:
         return adversary_ids
 
     def calculate_log_densities(self):
-        nsf_syn = OptimizedNSF(self.synthetic_train_loader)
+        nsf_syn = OptimizedNSF(self.synthetic_train_loader, self.synthetic_val_loader)
         syn_saving_keys = {"adversary":"DOMIAS", "syn":"", "sha":f"{subset_to_sha256_key(self.challenger_ids)}"}
         if nsf_syn.model_exists(**syn_saving_keys):
             nsf_syn.load(**syn_saving_keys)
@@ -206,12 +212,13 @@ class AdversaryDOMIAS:
             target = self.adversary_ds.getitem_by_id(target_id)['image']
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_syn.device)
+            # print("log_p_s val:", nsf_syn.eval_log_density(target).item())
             log_p_s.append(nsf_syn.eval_log_density(target).item())
 
         if "cuda" in str(nsf_syn.device):
             torch.cuda.empty_cache()
 
-        nsf_raw = OptimizedNSF(self.adversary_train_loader)
+        nsf_raw = OptimizedNSF(self.adversary_train_loader, self.adversary_val_loader)
         raw_saving_keys = {"adversary": "DOMIAS", "raw": "", "sha": f"{subset_to_sha256_key(self.adversary_ids)}"}
         if nsf_raw.model_exists(**raw_saving_keys):
             nsf_raw.load(**raw_saving_keys)
@@ -231,23 +238,33 @@ class AdversaryDOMIAS:
 
         return np.array(log_p_s, dtype=np.float64), np.array(log_p_r, dtype=np.float64)
 
-    def infer_membership_f_x(self, gamma=1):
-        diffs = self.log_p_S - self.log_p_R  # f(x) = log(x)
+    def infer_membership_logx(self, gamma):
+        diffs = self.f_logx_normalized(self.log_p_s, self.log_p_r)
         infered_memberships = []
         for diff in diffs:
-            if diff <= gamma:
+            if diff >= gamma:
                 b = 1
             else:
                 b = 0
             infered_memberships.append(b)
         return infered_memberships
 
-    def roc_curve(self):
+    def f_logx_normalized(self, log_a, log_b):
+        """f(log(a)/log(b)) = log(a) - log(b); f(x): [min_diff:max_diff] -> [0, 1]"""
+        diffs = log_a - log_b
+
+        # normalize diffs:
+        return (diffs - np.min(diffs)) / (np.max(diffs) - np.min(diffs))
+
+    def roc_curve(self, _range=None):
         tprs = []
         fprs = []
         true_memberships = np.array(self.true_memberships)
-        for gamma in range(-220000, -100000, 1000):
-            inferred_memberships = np.array((self.infer_membership_f_x(gamma)))
+
+        thresholds = np.arange(0.0, 1.01, 0.01)
+
+        for gamma in thresholds:
+            inferred_memberships = np.array((self.infer_membership_logx(gamma)))
 
             tp = np.sum((true_memberships == 1) & (inferred_memberships == 1))
             tn = np.sum((true_memberships == 0) & (inferred_memberships == 0))
@@ -259,7 +276,44 @@ class AdversaryDOMIAS:
             tprs.append(tpr)
             fprs.append(fpr)
 
+        print("tprs: ", tprs)
+        print("fprs: ", fprs)
         return tprs, fprs
+
+
+class AdversaryZCalibratedDOMIAS(AdversaryDOMIAS):
+    def __init__(
+        self,
+        _challenger: Challenger,
+        data_kwargs: dict,
+        nsf_train_loader_kwargs: dict,
+        background_knowledge: float = 0.0,
+        n_z=455,
+    ):
+        self.n_z = n_z
+        super().__init__(_challenger, data_kwargs, nsf_train_loader_kwargs, background_knowledge)
+        assert len(self.target_ids) == n_atlas, "Z-calibrated DOMIAS needs to use all datasets as targets."
+
+    def infer_membership_logx(self, gamma=1):
+        # TODO: try varying beta and gamma
+        n_calibration = self.n_z  # TODO: when implementing experiment with different values
+        random.seed(20)  # TODO: when implementing, set fresh seed again
+        membership_scores = []
+        beta_threshold = 0.5
+        target_ids = np.array(self.target_ids).copy()
+
+        for ii, target_id in enumerate(target_ids):
+            log_p_s_target = np.repeat(self.log_p_s[ii], n_calibration)  # 1-dim array of log_p_s values
+            reference_points = random.sample(self.adversary_ids, n_calibration)  # get n_calibration reference points
+            indices = np.array([np.where(np.array(target_ids == z))[0][0] for z in reference_points])
+            log_p_r_z = self.log_p_r[indices]
+
+            diffs = self.f_logx_normalized(log_p_s_target, log_p_r_z)
+
+            membership_scores.append(np.sum((diffs >= gamma)) / n_calibration)  # TODO: sanity check of <= gamma threshold
+
+        inferred_membership = np.where(np.array(membership_scores) > beta_threshold, 1, 0)
+        return inferred_membership
 
 
 class AdversaryLiRA:
