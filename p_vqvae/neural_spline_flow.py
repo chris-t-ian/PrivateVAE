@@ -20,7 +20,7 @@ from p_vqvae.networks import BaseModel
 
 data_kwargs = {
     "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
-    "cache_path": '/home/chrsch/P_VQVAE/data/cache/',
+    "cache_path": '/hobme/chrsch/P_VQVAE/data/cache/',
     "downsample": 4,
     "normalize": 1,
     "crop": ((8, 9), (12, 13), (0, 9)),
@@ -34,7 +34,7 @@ train_loader_kwargs = {
 model_params = {
     "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
     "device": "cuda",
-    "eval_interval": 10,  # after how many steps evaluate on validation set
+    "eval_interval": 20,  # after how many steps evaluate on validation set
     "early_stopping": 4,  # after how many evaluation steps stop the training
     "steps_per_level": 10,
     "levels": 2,  # increase for non-downsampled dataset
@@ -54,8 +54,7 @@ optimization = {
     "learning_rate": 1e-5,
     "cosine_annealing": False,
     "eta_min": 0.,
-    "warmup_fraction": 0.,
-    "num_steps": 5000,
+    "num_steps": 1000,  # change in implementation
 }
 coupling_transform = {
     "coupling_layer_type": 'rational_quadratic_spline',
@@ -476,8 +475,8 @@ def nats_to_bits_per_dim(nats, _c, _h, _w, _d):
 class NSF(BaseModel):
     def __init__(
         self,
-        train_loader,
-        val_loader=None,
+        _train_loader,
+        _val_loader=None,
         model_path=None,
         steps_per_level=10,
         levels=3,
@@ -507,10 +506,9 @@ class NSF(BaseModel):
 
         seed=None
     ):
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.train_loader = _train_loader
+        self.val_loader = _val_loader
         self.shape = next(iter(self.train_loader))['image'].shape
-        print("input shape before passing to network: ", self.shape)
 
         # model params
         self.steps_per_level = steps_per_level
@@ -663,7 +661,7 @@ class NSF(BaseModel):
                 scheduler.step()
 
             if step > 0 and step % self.eval_interval == 0 and (self.val_loader is not None):
-                val_log_prob = self.eval_log_density()
+                val_log_prob = self.val_eval_log_density()
                 val_log_prob = val_log_prob[0].item()  # mean loss for all validation batches
 
                 if best_val_log_prob is None or val_log_prob > best_val_log_prob:
@@ -688,7 +686,7 @@ class NSF(BaseModel):
             torch.cuda.empty_cache()
         return best_val_log_prob
 
-    def eval_log_density(self, num_batches=None):
+    def val_eval_log_density(self, num_batches=None):
         c, h, w, d = self.shape[1:]
         with torch.no_grad():
             total_ld = []
@@ -703,6 +701,19 @@ class NSF(BaseModel):
             total_ld = torch.cat(total_ld)
             total_ld = nats_to_bits_per_dim(total_ld, c, h, w, d)
             return total_ld.mean(), 2 * total_ld.std() / total_ld.shape[0]
+
+    def eval_log_density(self, input):
+        assert input.dim() in [5], "Give 5 dimensional input."
+        with torch.no_grad():
+            c, h, w, d = input.shape[1:]
+            input = input.to(device=self.device, dtype=torch.float32)
+            log_prob = self.model.log_prob(input)
+            return log_prob
+
+
+class OptimizedNSF(NSF):
+    def __init__(self, _train_loader, _val_loader=None):
+        super().__init__(_train_loader, _val_loader, **nsf_params)
 
 
 if __name__ == "__main__":
