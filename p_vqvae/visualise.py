@@ -26,14 +26,19 @@ def plot_generated_images(img: np.array, n=3):
 
     img = check_and_remove_channel_dimension(img)
 
-    fig, ax = plt.subplots(nrows=1, ncols=n)
-    plt.style.use("default")
+    if n == 1:
+        image = get3d_middle_slices(img[0])
+        plt.imshow(image, cmap="gray")
 
-    for i in range(n):
-        image = get3d_middle_slices(img[i])
-        ax[i].imshow(image, cmap="gray")
-        ax[i].axis("off")
-        ax[i].title.set_text(f"Synthetic image {i}")
+    else:
+        fig, ax = plt.subplots(nrows=1, ncols=n)
+        plt.style.use("default")
+
+        for i in range(n):
+            image = get3d_middle_slices(img[i])
+            ax[i].imshow(image, cmap="gray")
+            ax[i].axis("off")
+            ax[i].title.set_text(f"Synthetic image {i}")
 
     plt.show()
 
@@ -107,19 +112,19 @@ def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.ar
 def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None):
     auc = calculate_AUC(tprs, fprs)
     if label:
-        plt.plot(fprs, tprs, marker='.', label=f'{label} (AUC = {auc:.4f})')
+        plt.plot(fprs, tprs, label=f'{label} (AUC = {auc:.4f})')
     else:
-        plt.plot(fprs, tprs, marker='.', label=f'AUC = {auc:.4f}')
+        plt.plot(fprs, tprs, label=f'AUC = {auc:.4f}')
 
     if tprs2 and fprs2:
         assert label and label2, "Specify labels."
         auc = calculate_AUC(tprs2, fprs2)
-        plt.plot(fprs2, tprs2, marker='.', label=f'{label2} (AUC = {auc:.4f})')
+        plt.plot(fprs2, tprs2, label=f'{label2} (AUC = {auc:.4f})')
 
     if tprs3 and fprs3:
         assert label3, "Specify label 3"
         auc = calculate_AUC(tprs3, fprs3)
-        plt.plot(fprs3, tprs3, marker='.', label=f'{label3} (AUC = {auc:.4f})')
+        plt.plot(fprs3, tprs3, label=f'{label3} (AUC = {auc:.4f})')
 
     plt.plot([0, 1], [0, 1], linestyle='--', color='gray')  # Diagonal line for random chance
     plt.xlabel('False Positive Rate')
