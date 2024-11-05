@@ -1,24 +1,25 @@
 from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader, get_train_val_loader
-from p_vqvae.networks import train_transformer_and_vqvae
+from p_vqvae.networks import train_transformer_and_vqvae, MembershipClassifier
 from p_vqvae.neural_spline_flow import OptimizedNSF
 from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
+from scipy.stats import multivariate_normal
+from torch.utils.data import ConcatDataset
+from sklearn.metrics import roc_curve
 import numpy as np
 import random
 import torch
 import os
 
-N = 32  # number of shadow models for LiRA attack
+test_mode = True
 n_atlas = 955
-n_train = n_atlas // 2  # amount of images for the challenger and the adversary models. ATLAS v2 dataset n = 955
-
-assert N % 2 == 0, "Make sure to give an even N. Else the distribution of targets is uneven."
 
 include_targets_in_reference_dataset = None  # either True, False or None (=included at random)
 
 
 class ChallengerRawDataSet(RawDataSet):
-    def __init__(self, seed, **kwargs):
+    def __init__(self, seed, n_train, **kwargs):
         super().__init__(mode="full", **kwargs)
+        self.n_train = n_train
         self.challenger_ids, self.non_challenger_ids = self.sample_challenger_dataset(seed)
 
     def __getitem__(self, idx):
@@ -36,12 +37,11 @@ class ChallengerRawDataSet(RawDataSet):
         """Return length of challenger dataset instead of the size of the whole data distribution."""
         return len(self.challenger_ids)
 
-    @staticmethod
-    def sample_challenger_dataset(seed):
+    def sample_challenger_dataset(self, seed):
         """Take entire (memory mapped) dataset and sample n_train images. Return sampled dataset in random order and the
         rest of the dataset distribution without the challenger dataset."""
         random.seed(seed)  # fixed seed for sampling datasets
-        random_challenger_ids = random.sample(range(0, n_atlas), n_train)
+        random_challenger_ids = random.sample(range(0, n_atlas), self.n_train)
         non_challenger_ids = [i for i in range(0, n_atlas) if i not in random_challenger_ids]
 
         # return distribution[random_challenger_ids], distribution[non_challenger_ids]
@@ -51,6 +51,7 @@ class ChallengerRawDataSet(RawDataSet):
 class Challenger:
     def __init__(
             self,
+            n_c,
             m_c,
             raw_data_kwargs: dict,
             vqvae_train_loader_kwargs: dict,
@@ -62,21 +63,26 @@ class Challenger:
         self.data_seed = 420
         self.training_seed = 69
 
+        self.raw_data_kwargs = raw_data_kwargs
+        self.vqvae_train_loader_kwargs = vqvae_train_loader_kwargs
+        self.training_vqvae_kwargs = training_vqvae_kwargs
+        self.training_transformer_kwargs = training_transformer_kwargs
+
         # sample challenger dataset using fixed seed
-        challenger_ds = ChallengerRawDataSet(self.data_seed, **raw_data_kwargs)
+        challenger_ds = ChallengerRawDataSet(self.data_seed, n_c, **raw_data_kwargs)
         challenger_train_loader = get_train_loader(challenger_ds, **vqvae_train_loader_kwargs)
 
         # train challenger model, train VQVAE and transformer decoder at once using a fixed seed
         self.t_vqvae = train_transformer_and_vqvae(challenger_train_loader, training_vqvae_kwargs,
-                                              training_transformer_kwargs,
-                                              saving_kwargs={"challenger": 1, "seed": self.training_seed},
-                                              seed=self.training_seed,
-                                              )
-
+                                                   training_transformer_kwargs,
+                                                   saving_kwargs={"challenger": 1, "n": f"{n_c}",
+                                                                  "seed": self.training_seed},
+                                                   seed=self.training_seed,
+                                                   )
 
         # load m synthetic datapoints or generate and save them
         path_to_syn_data = os.path.join(training_transformer_kwargs["model_path"], "synthetic_data")
-        path_to_syn_data = os.path.join(path_to_syn_data, f"challenger_syn_seed{self.training_seed}_2.npy")
+        path_to_syn_data = os.path.join(path_to_syn_data, f"challenger_syn_seed{self.training_seed}_n{n_c}.npy")
 
         if not os.path.isfile(path_to_syn_data):
             challenger_syn_imgs = self.t_vqvae.create_synthetic_images(self.m_c)
@@ -160,6 +166,7 @@ class AdversaryDOMIAS:
         self.non_challenger_ids = _challenger.non_challenger_ids
         self.target_ids = _challenger.target_ids
         self.true_memberships = _challenger.target_memberships
+        self.thresholds = None
         self.adversary_ids = self.sample_adversary_ids(n=len(self.challenger_ids))
         self.adversary_ds = AdversaryRawDataSet(self.adversary_ids, **data_kwargs)
         # self.adversary_train_loader = get_train_loader(self.adversary_ds, **nsf_train_loader_kwargs)
@@ -199,7 +206,8 @@ class AdversaryDOMIAS:
 
     def calculate_log_densities(self):
         nsf_syn = OptimizedNSF(self.synthetic_train_loader, self.synthetic_val_loader)
-        syn_saving_keys = {"adversary":"DOMIAS", "syn":"", "sha":f"{subset_to_sha256_key(self.challenger_ids)}"}
+        syn_saving_keys = {"adversary": "DOMIAS", "syn": "", "sha": f"{subset_to_sha256_key(self.challenger_ids)}"}
+
         if nsf_syn.model_exists(**syn_saving_keys):
             nsf_syn.load(**syn_saving_keys)
         else:
@@ -249,7 +257,8 @@ class AdversaryDOMIAS:
             infered_memberships.append(b)
         return infered_memberships
 
-    def f_logx_normalized(self, log_a, log_b):
+    @staticmethod
+    def f_logx_normalized(log_a, log_b):
         """f(log(a)/log(b)) = log(a) - log(b); f(x): [min_diff:max_diff] -> [0, 1]"""
         diffs = log_a - log_b
 
@@ -261,7 +270,10 @@ class AdversaryDOMIAS:
         fprs = []
         true_memberships = np.array(self.true_memberships)
 
-        thresholds = np.arange(0.0, 1.01, 0.01)
+        if self.thresholds is None:
+            thresholds = np.arange(0.0, 1.002, 0.002)
+        else:
+            thresholds = self.thresholds
 
         for gamma in thresholds:
             inferred_memberships = np.array((self.infer_membership_logx(gamma)))
@@ -282,6 +294,7 @@ class AdversaryDOMIAS:
 
 
 class AdversaryZCalibratedDOMIAS(AdversaryDOMIAS):
+    """Using p_S(x)/p_R(z)."""
     def __init__(
         self,
         _challenger: Challenger,
@@ -305,29 +318,83 @@ class AdversaryZCalibratedDOMIAS(AdversaryDOMIAS):
         for ii, target_id in enumerate(target_ids):
             log_p_s_target = np.repeat(self.log_p_s[ii], n_calibration)  # 1-dim array of log_p_s values
             reference_points = random.sample(self.adversary_ids, n_calibration)  # get n_calibration reference points
+            # print("ok")
             indices = np.array([np.where(np.array(target_ids == z))[0][0] for z in reference_points])
             log_p_r_z = self.log_p_r[indices]
 
             diffs = self.f_logx_normalized(log_p_s_target, log_p_r_z)
 
-            membership_scores.append(np.sum((diffs >= gamma)) / n_calibration)  # TODO: sanity check of <= gamma threshold
+            membership_scores.append(np.sum((diffs >= gamma)) / n_calibration)
 
         inferred_membership = np.where(np.array(membership_scores) > beta_threshold, 1, 0)
         return inferred_membership
+
+
+class AdversaryZCalibratedDOMIAS2(AdversaryZCalibratedDOMIAS):
+    """Using p_S(x)/p_S(z)."""
+    def __init__(
+        self,
+        _challenger: Challenger,
+        data_kwargs: dict,
+        nsf_train_loader_kwargs: dict,
+        background_knowledge: float = 0.0,
+        n_z=455,
+    ):
+        self.thresholds = np.arange(0.4, 0.072, 0.001)
+        super().__init__(_challenger, data_kwargs, nsf_train_loader_kwargs, background_knowledge, n_z)
+
+    def calculate_log_densities(self):
+        nsf_syn = OptimizedNSF(self.synthetic_train_loader, self.synthetic_val_loader)
+        syn_saving_keys = {"adversary": "DOMIAS", "syn": "", "sha": f"{subset_to_sha256_key(self.challenger_ids)}"}
+
+        if nsf_syn.model_exists(**syn_saving_keys):
+            nsf_syn.load(**syn_saving_keys)
+        else:
+            nsf_syn.train(**syn_saving_keys)
+            nsf_syn.save(**syn_saving_keys)
+
+        # for every target x get p_S(x) from the nsf-density estimator
+        log_p_s = []
+        for target_id in self.target_ids:
+            target = self.adversary_ds.getitem_by_id(target_id)['image']
+            target = np.expand_dims(target, axis=0)
+            target = torch.from_numpy(target).to(device=nsf_syn.device)
+            # print("log_p_s val:", nsf_syn.eval_log_density(target).item())
+            log_p_s.append(nsf_syn.eval_log_density(target).item())
+
+        if "cuda" in str(nsf_syn.device):
+            torch.cuda.empty_cache()
+
+        return np.array(log_p_s, dtype=np.float64), np.array(log_p_s, dtype=np.float64)
 
 
 class AdversaryLiRA:
     def __init__(
             self,
             _challenger: Challenger,
+            offline: bool = True,
+            n_reference_models: int = 2,  # reference models for in or out world
             background_knowledge: float = 0.0,
+            shadow_model_train_loader_kwargs: dict = None,
     ):
-
+        if test_mode:
+            random.seed(10)
+        else:
+            random.seed()
+        self.N = n_reference_models
+        self.offline = offline
         self.target_ids = _challenger.target_ids
+        self.true_memberships = _challenger.target_memberships
         self.n_dataset = len(_challenger.challenger_ids)
         self.synthetic_images_challenger = _challenger.challenger_syn_dataset
         self.m_c = self.synthetic_images_challenger.get_data().shape[0]  # number of synthetic images of the challenger
         self.background_knowledge = background_knowledge
+
+        self.raw_data_kwargs = _challenger.raw_data_kwargs
+        self.training_vqvae_kwargs = _challenger.training_vqvae_kwargs
+        self.vqvae_train_loader_kwargs = _challenger.vqvae_train_loader_kwargs
+        self.training_transformer_kwargs = _challenger.training_transformer_kwargs
+        self.shadow_model_train_loader_kwargs = shadow_model_train_loader_kwargs
 
         # remove targets from id list to avoid unintended (double) membership.
         self.challenger_ids = _challenger.challenger_ids
@@ -337,12 +404,130 @@ class AdversaryLiRA:
         random.shuffle(self.non_challenger_ids_without_targets)
 
         # sample adversary shadow dataset ids
-        self.adversary_ids = self.sample_shadow_ids(background_knowledge=self.background_knowledge)
+        self.adversary_ids = self.sample_shadow_ids(background_knowledge=self.background_knowledge, online=not offline)
+        self.all_synthetic_reference_datasets = []
 
-        # for every target, define an in- or out-dataset.
-        # self.adversary_datasets = self.get_adversary_datasets(**dataset_kwargs)
+        if offline:
+            self.likelihood_out = self.offline_attack()
+            self.tprs, self.fprs = None, None
+        else:
+            self.likelihood_in, self.likelihood_out = self.online_attack()
+            self.tprs, self.fprs, thresholds = self.infer_membership_online()
 
-    def sample_shadow_ids(self, background_knowledge=0.0):
+    def infer_membership_online(self):
+        likelihood_ratios = np.divide(self.likelihood_in, self.likelihood_out)
+        print("likelihood ratios: ", likelihood_ratios)
+        return roc_curve(np.array(self.true_memberships), likelihood_ratios)
+
+    def online_attack(self):
+        q_out = np.empty((self.N, self.m_c))
+        q_in = np.empty((self.N, self.m_c))
+        for model_id in range(0, self.N * 2, 2):
+            out_ids = self.adversary_ids[model_id, :]
+            out_syn_train_loader = self.create_reference_synthetic_dataset(out_ids, model_id, label=0)
+            out_reference_model = self.train_reference_model(out_syn_train_loader, out_ids)
+            q_out[model_id, :] = self.predict(out_reference_model)
+
+            in_ids = self.adversary_ids[model_id, :]
+            in_syn_train_loader = self.create_reference_synthetic_dataset(in_ids, model_id, label=1)
+            in_reference_model = self.train_reference_model(in_syn_train_loader, in_ids)
+            q_in[model_id, :] = self.predict(in_reference_model)
+
+        q_in_mean, q_in_std = np.mean(q_in), np.std(q_in)
+        q_out_mean, q_out_std = np.mean(q_out), np.std(q_out)
+
+        # get "confidence" scores for target synthetic dataset by training a "global" classifier on all datasets
+        global_data_set = ConcatDataset(self.all_synthetic_reference_datasets)
+        global_train_loader = get_train_loader(global_data_set, **self.shadow_model_train_loader_kwargs)
+        global_model = self.train_reference_model(global_train_loader)
+        target_confidence = self.predict(global_model)
+        assert len(target_confidence) == self.m_c
+
+        # calculate likelihoods:
+        mu_out = np.repeat(q_out_mean, self.m_c)  # Mean vector for non-member distribution
+        sigma_out = q_out_std * np.eye(self.m_c)
+        mvn_out = multivariate_normal(mean=mu_out, cov=sigma_out)  # multivariate spherical normal
+        likelihood_out = mvn_out.pdf(target_confidence)
+
+        mu_in = np.repeat(q_in_mean, self.m_c)  # Mean vector for non-member distribution
+        sigma_in = q_in_std * np.eye(self.m_c)
+        mvn_in = multivariate_normal(mean=mu_in, cov=sigma_in)
+        likelihood_in = mvn_in.pdf(target_confidence)
+
+        return likelihood_in, likelihood_out
+
+    def offline_attack(self):
+        confidence = np.empty((self.N, self.m_c))
+        for model_id in range(self.N):
+            out_ids = self.adversary_ids[model_id, :]
+            syn_train_loader = self.create_reference_synthetic_dataset(out_ids, model_id)
+            reference_model = self.train_reference_model(syn_train_loader, out_ids)
+
+            confidence[model_id, :] = self.predict(reference_model)  # len(log_p_st_given_s) == len(s_target)
+
+        # get mean and std of losses:
+        mu = np.mean(confidence)
+        std = np.std(confidence)
+
+        if True:
+            import matplotlib.pyplot as plt
+            plt.hist(confidence, color='blue', alpha=0.8, bins=100)
+            plt.xlabel("loss")
+            plt.show()
+
+        mean_vector = np.repeat(mu, self.m_c)
+        covariance_matrix = std * np.eye(self.m_c)
+        raise NotImplementedError
+
+    def create_reference_synthetic_dataset(self, ids, model_id, label=None):
+        # sha_key = "65674f68" if test_mode else subset_to_sha256_key(ids)
+        sha_key = subset_to_sha256_key(ids)
+        ds = AdversaryRawDataSet(ids, **self.raw_data_kwargs)
+        adversary_train_loader = get_train_loader(ds, **self.vqvae_train_loader_kwargs)
+
+        # train challenger model, train VQVAE and transformer decoder at once using a fixed seed
+        t_vqvae = train_transformer_and_vqvae(adversary_train_loader, self.training_vqvae_kwargs,
+                                              self.training_transformer_kwargs,
+                                              saving_kwargs={"adversary": str(model_id),
+                                                             "sha": sha_key,
+                                                             "l": label}
+                                              )
+
+        # load m synthetic datapoints or generate and save them
+        path_to_syn_data = os.path.join(self.training_transformer_kwargs["model_path"], "synthetic_data")
+        path_to_syn_data = os.path.join(path_to_syn_data,
+                                        f"adversary{model_id}_syn_knowledge{self.background_knowledge}_"
+                                        f"sha{sha_key}_l{label}.npy")
+
+        if not os.path.isfile(path_to_syn_data):
+            challenger_syn_imgs = t_vqvae.create_synthetic_images(self.m_c)
+            np.save(path_to_syn_data, challenger_syn_imgs)
+
+        if label is None:
+            syn_data_set = SyntheticDataSet(path_to_syn_data)
+        else:
+            labels = np.repeat(label, self.m_c)
+            syn_data_set = SyntheticDataSet(path_to_syn_data, labels)
+
+        if "cuda" in str(t_vqvae.device):
+            torch.cuda.empty_cache()
+
+        self.all_synthetic_reference_datasets.append(syn_data_set)
+
+        return get_train_loader(syn_data_set, **self.shadow_model_train_loader_kwargs)
+
+    def train_reference_model(self, data_loader, ids=None):
+        """Train reference model on synthetic data."""
+        raise NotImplementedError
+
+    def predict(self, model):
+        raise NotImplementedError
+
+    @staticmethod
+    def logit_transform(logits):
+        return logits
+
+    def sample_shadow_ids(self, background_knowledge=0.0, online=False):
         """Sample N datasets where the targets are evenly distributed such that one target is N/2 of the dataset and not
         in the other N/2-half of the datasets. Return list of indices representing the datapoints that the adversary
         uses to train its shadow models.
@@ -354,22 +539,25 @@ class AdversaryLiRA:
         The overlap is also never at 100% (but probably more than 90%) since the random assigment of targets may
         disproportionately overwrite either challenger or non-challenger ids.
         """
-
         assert max(self.non_challenger_ids_without_targets) < 65535, "Range of ids incompatible with uint16"
-        datasets = np.empty((N, self.n_dataset), dtype=np.uint16)
 
-        for ii in range(N):
+        n_datasets = self.N * 2 if online else self.N
+        step_size = 2 if online else 1
+
+        datasets = np.empty((n_datasets, self.n_dataset), dtype=np.uint16)
+
+        for ii in range(0, n_datasets, step_size):
             row = []
             if background_knowledge == 0.0:
-                # sample N random datasets on non_challenger ids without any target
-                row = random.sample(self.non_challenger_ids_without_targets, self.n_dataset)
+                # sample N random datasets on non_challenger ids without any target, fill the rest with challenger_ids
+                row = self.non_challenger_ids_without_targets.copy()
+                row.extend(random.sample(self.challenger_ids_without_targets, self.n_dataset - len(row)))
 
             elif background_knowledge == 0.5:
                 # for every shadow dataset take 50% of adversary ids and 50% of non-adversary ids
                 assert self.n_dataset % 2 == 0, "Size of dataset should be divisible by 2."
                 row = random.sample(self.non_challenger_ids_without_targets, self.n_dataset // 2)
                 row.extend(random.sample(self.challenger_ids_without_targets, self.n_dataset // 2))
-                random.shuffle(row)
 
             elif background_knowledge == 1.0:
                 # sample N random datasets on challenger ids without any targets, always use full list of challenger ids
@@ -379,43 +567,30 @@ class AdversaryLiRA:
 
                 # fill the rest of the adversary datasets with non_challenger_ids
                 row.extend(random.sample(self.non_challenger_ids_without_targets, self.n_dataset - len(row)))
-                random.shuffle(row)
             else:
                 print("this amount of adversary knowledge is not handled yet")
 
+            if online:
+                in_ids = row.copy()
+                in_ids[len(row) - len(self.target_ids):] = self.target_ids  # replacing last ids in list with targets
+                random.shuffle(in_ids)
+                assert len(in_ids) == len(set(in_ids)), f"duplicates: {set([x for x in in_ids if in_ids.count(x) > 1])}"
+                datasets[ii + 1, :] = in_ids
+
+            random.shuffle(row)
             assert len(row) == len(set(row)), f"{set([x for x in row if row.count(x) > 1])} are duplicates"
             assert len(row) == self.n_dataset
             datasets[ii, :] = row
 
-        # distribute targets, make sliding window assign half of each column with one target
-        starting_k = 0
-        ending_k = N // 2
-        ending_k_2 = 1  # needed if sliding window reaches the border (where ending_k >= N).
-
-        for ii in range(N):
-            column = datasets[:, ii].copy()  # get colum
-            single_target_id = self.target_ids[ii]  # select target
-
-            if ending_k <= N:
-                column[starting_k:ending_k] = np.repeat(single_target_id, N//2)
-            else:
-                column[0: ending_k_2] = np.repeat(single_target_id, ending_k_2)
-                column[starting_k:N] = np.repeat(single_target_id, N - starting_k)
-                ending_k_2 = +1
-
-            # shift assignment sliding window by 1 for the next column:
-            starting_k += 1
-            ending_k += 1
-
-            datasets[:, ii] = column  # re-assign column
+            # print("number of duplicates in row: ", np.sum(np.unique(row, return_counts=True)[1] - 1))
 
         return datasets
 
     def get_empirical_overlap(self):
         """Calculate the mean (and std) of the overlap between the adversary datasets and the challenger dataset.
         Calculate with targets."""
-        overlap = np.empty(N)
-        for ii in range(N):
+        overlap = np.empty(self.adversary_ids.shape[0])
+        for ii in range(self.adversary_ids.shape[0]):
             adversary_list = list(self.adversary_ids[ii, :])
             overlap[ii] = len(set(adversary_list) & set(self.challenger_ids)) / len(self.challenger_ids)
 
@@ -424,36 +599,82 @@ class AdversaryLiRA:
 
         return mean, std
 
-    def get_adversary_datasets(self, target, **kwargs) -> list[RawDataSet]:
-        datasets = []
-        # for N in datasets:
-        #    pass
-        return datasets
 
-    def train_shadow_generators(self, datasets, **training_kwargs):
-        """Train N shadow model generators. Save their weights in a file."""
-        shadow_models = []
+class AdversaryLiRAClassifier(AdversaryLiRA):
+    def train_reference_model(self, data_loader, ids=None):
+        """Train membership classifier."""
+        classifier = MembershipClassifier(data_loader)
+        saving_keys = {"adversary": "LiRA_classifier", "syn": "", "sha": f"{subset_to_sha256_key(ids)}"}
 
-        return shadow_models
+        if classifier.model_exists(**saving_keys):
+            classifier.load(**saving_keys)
+        else:
+            classifier.train()
+            classifier.save(**saving_keys)
 
-    def create_synthetic_datasets(self, m_a):
-        """For each model create m_a synthetic shadow datasets. Save them in the same folder as the models. If data
-        exist, load from disc. Return mmap of synthetic datasets"""
-        synthetic_images_adversary = []
+        return classifier
 
-        return synthetic_images_adversary
+    def predict(self, model, loss=True):
+        """Get un-normalized features a.k.a. logits (i.e., the outputs of the model’s last layer before the softmax
+        function)"""
+        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augment_flag=False, num_workers=1)
+        logits = []
+        for img in loader:
+            logits.append(model.logits(img))
 
-    def train_shadow_classifier(self):
-        """For every target t redefine S_in, S_out and train a classifier f on the membership of t."""
-        shadow_classifiers = []
-        return shadow_classifiers
+        if "cuda" in model.device:
+            torch.cuda.empty_cache()
 
-    def logit_scaling(self):
-        pass
+        return self.logit_transform(logits)
 
-    def train_global_classifier(self):
-        pass
+    @staticmethod
+    def logit_transform(logits):
+        """See Carlini et al. 2022. Using all classes because the class of the target is not known."""
+        logits = np.array(logits)
 
-    def calculate_likelihood_ratio(self):
-        pass
+        # compute the LogSumExp of all logits for numerical stability
+        max_logit = np.max(logits)
+        logsumexp_all = np.log(np.sum(np.exp(logits - max_logit))) + max_logit
 
+        # calculate phi(f(x)_y) for each class in a numerically stable way
+        return logits - logsumexp_all
+
+
+class AdversaryLiRANSF(AdversaryLiRA):
+    def train_reference_model(self, data_loader, ids=None):
+        """Train NSF."""
+        assert ids
+        nsf = OptimizedNSF(data_loader)
+        saving_keys = {"adversary": "LiRA_NSF", "syn": "", "sha": f"{subset_to_sha256_key(ids)}"}
+
+        if nsf.model_exists(**saving_keys):
+            nsf.load(**saving_keys)
+        else:
+            nsf.train(**saving_keys)
+            nsf.save(**saving_keys)
+
+        return nsf
+
+    def predict(self, model):
+        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augment_flag=False, num_workers=1)
+        log_p_s = []
+        for img in loader:
+            print("img.shape: ", img.shape)
+            log_p_s.append(model.eval_log_density(img))
+        return np.array(log_p_s)
+
+
+class AdversaryRMIANSF(AdversaryLiRANSF):
+    def __init__(
+            self,
+            _challenger: Challenger,
+            nsf_train_loader_kwargs: dict,
+            offline: bool = True,
+            n_reference_models: int = 2,  # reference models for in or out world
+            background_knowledge: float = 0.0,
+    ):
+        self.nsf_train_loader_kwargs = nsf_train_loader_kwargs
+        super().__init__(_challenger, offline, n_reference_models, background_knowledge)
+
+    def infer_membership(self):
+        raise NotImplementedError
