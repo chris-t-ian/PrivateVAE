@@ -259,18 +259,35 @@ class RawDataSet(DataSet):
 
 
 class SyntheticDataSet(DataSet):
-    def __init__(self, cached_file, dtype=np.float16):
+    def __init__(self, cached_file, labels=None, dtype=np.float16):
         self.cached_file = cached_file
-        self.data = self.__load__()
-        super().__init__(self.data, dtype)
+        self.labels = labels
+        self.images = self.__load__()
+        super().__init__(self.images, dtype)
 
     def __load__(self):
         assert os.path.isfile(self.cached_file), f"Cached file {self.cached_file} does not exist."
         return np.load(self.cached_file, mmap_mode='r')
 
+    def __getitem__(self, idx):
+        image = np.copy(self.images[idx])
+
+        if self.transform:
+            image = self.transform(image)
+
+        if self.dtype == torch.float32 and image.dtype == torch.uint8:
+            image = uint8_to_float32(image)
+        elif self.dtype == torch.uint8 and image.dtype == torch.float32:
+            image = float32_to_uint8(image)
+
+        if self.labels is not None:
+            return {"image": image, "label": self.labels[idx]}
+        else:
+            return {"image": image}
+
 
 def get_train_val_loader(
-        dataset: DataSet,
+        dataset,
         batch_size: int = 8,
         augment_flag=True,
         split_ratio: float = 0.875,
@@ -299,7 +316,7 @@ def get_train_val_loader(
 
 
 def get_train_loader(
-    dataset: DataSet,
+    dataset,
     batch_size: int = 8,
     augment_flag=True,
     num_workers=8,
