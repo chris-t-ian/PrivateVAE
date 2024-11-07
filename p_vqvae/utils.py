@@ -17,4 +17,4 @@ def subset_to_sha256_key(subset, len_set=956, len_key=8):
 
 
 def calculate_AUC(tprs, fprs):
-    return np.trapz(tprs, x=fprs)
+    return np.abs(np.trapz(tprs, x=fprs))
