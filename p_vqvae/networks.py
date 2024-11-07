@@ -92,6 +92,145 @@ class BaseModel:
             print(f"Model file not found: {full_path}")
 
 
+class MembershipClassifierModule(torch.nn.Module):
+    def __init__(self, input_dims, num_classes, hidden_channels):
+        super(MembershipClassifierModule, self).__init__()
+
+        self.input_dims = input_dims
+        print("input dims: ", self.input_dims)
+        self.hidden_channels = hidden_channels
+
+        self.conv1 = torch.nn.Conv3d(1, hidden_channels[0], kernel_size=3, stride=1, padding=1)
+        self.conv2 = torch.nn.Conv3d(hidden_channels[0], hidden_channels[1], kernel_size=3, stride=1, padding=1)
+        self.conv3 = torch.nn.Conv3d(hidden_channels[1], hidden_channels[2], kernel_size=3, stride=1, padding=1)
+
+        self.pool = torch.nn.MaxPool3d(kernel_size=2, stride=2)
+
+        self.fc1 = None
+        self.fc2 = torch.nn.Linear(128, num_classes)
+
+        self.dropout = torch.nn.Dropout(0.5)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))  # First 3D Conv layer
+        x = self.pool(torch.relu(self.conv2(x)))  # Second 3D Conv layer
+        x = self.pool(torch.relu(self.conv3(x)))  # Third 3D Conv layer
+
+        flattened_dim = x.shape[1] * x.shape[2] * x.shape[3] * x.shape[4]  # Correct flattened size
+
+        # Initialize fc1 if it hasn't been initialized yet
+        if self.fc1 is None:
+            self.fc1 = torch.nn.Linear(flattened_dim, 128).to(x.device)
+
+        x = x.view(-1, flattened_dim)  # Flatten 3D feature maps to 1D
+        x = torch.relu(self.fc1(x))  # Fully connected layer
+        x = self.dropout(x)  # Dropout for regularization
+        x = self.fc2(x)  # Output layer
+
+        return x
+
+
+class MembershipClassifier(BaseModel):
+    def __init__(
+            self,
+            train_loader,
+            val_loader=None,
+            channels=(16, 32, 64),
+            epochs=100,
+            val_interval=10,
+            model_path=None,
+            device=None,
+            seed=None
+    ):
+        self.train_loader = train_loader
+        self.shape = next(iter(self.train_loader))['image'].shape
+        self.val_loader = val_loader
+        self.channels = channels
+        self.n_epochs = epochs
+        self.val_interval = val_interval
+        self.early_stopping_patience = float('inf')
+
+        model = self._init_model()
+        super().__init__(model, model_path, "MembershipCNN", device, seed)
+
+        self.loss = torch.nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+
+    def _init_model(self):
+        return MembershipClassifierModule(self.shape[2:], num_classes=2, hidden_channels=self.channels)
+
+    def train(self):
+        best_val_loss = float("inf")
+        epochs_without_improvement = 0
+        best_model_weights = None
+        for epoch in range(self.n_epochs):
+
+            self.model.train()
+            running_loss = 0.0
+
+            progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
+            progress_bar.set_description(f"Epoch {epoch}")
+            for step, batch in progress_bar:
+                images = batch['image'].to(self.device)
+                labels = batch['label'].to(self.device)
+                # TODO: shuffle labels
+                print("images: ", images.shape)
+                print("labels: ", labels)
+
+                self.optimizer.zero_grad()
+                outputs = self.model(images)
+                loss = self.loss(outputs, labels)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item() * images.size(0)
+                progress_bar.set_postfix({"loss": loss.item()})
+
+            if (epoch + 1) % self.val_interval == 0 and self.val_loader:
+                val_loss = self.validate()
+
+                if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_weights = self.model.state_dict()  # Save best weights
+                    epochs_without_improvement = 0  # Reset counter if improvement is found
+                else:
+                    epochs_without_improvement += 1
+
+            if epochs_without_improvement >= self.early_stopping_patience:
+                print(f"Early stopping at epoch {epoch + 1}.")
+
+                if best_model_weights:
+                    print("Loading best model weights so far.")
+                    self.model.load_state_dict(best_model_weights)
+
+                break
+
+    def validate(self):
+        self.model.eval()
+        running_loss = 0.0
+        correct = 0
+
+        with torch.no_grad():
+            for images, labels in self.val_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                outputs = self.model(images)
+                loss = self.loss(outputs, labels)
+
+                running_loss += loss.item() * images.size(0)
+                _, preds = torch.max(outputs, 1)
+                correct += (preds == labels).sum().item()
+
+        accuracy = correct / len(self.val_loader.dataset)
+        return running_loss / len(self.val_loader.dataset), accuracy
+
+    def logits(self, _input):
+        self.model.eval()
+        with torch.no_grad():
+            logits = self.model(_input)
+
+        return logits
+
+
 class VQ_VAE(BaseModel):
     def __init__(
         self,
@@ -219,7 +358,7 @@ class VQ_VAE(BaseModel):
             self.epoch_quant_loss_list.append(quantization_loss.item() / (step + 1))
 
             if (epoch + 1) % self.val_interval == 0 and self.val_loader:
-                val_loss = self.validate(epoch)
+                val_loss = self.validate()
 
                 if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -247,7 +386,7 @@ class VQ_VAE(BaseModel):
 
         return val_loss
 
-    def validate(self, epoch):
+    def validate(self):
         self.model.eval()
         val_loss = 0
         with torch.no_grad():
