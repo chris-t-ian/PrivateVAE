@@ -3,6 +3,8 @@ import numpy as np
 from torch import Tensor, get_device
 from p_vqvae.utils import calculate_AUC
 
+plt.rcParams['figure.figsize'] = [5, 3.75]
+
 
 def check_and_remove_channel_dimension(x):
     if len(x.shape) == 5:
@@ -109,7 +111,8 @@ def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.ar
     plt.show()
 
 
-def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None):
+def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None,
+                   low_fprs=False):
     auc = calculate_AUC(tprs, fprs)
     if label:
         plt.plot(fprs, tprs, label=f'{label} (AUC = {auc:.4f})')
@@ -130,6 +133,11 @@ def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, 
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.legend(loc='lower right')
+    if low_fprs:
+        plt.yscale('log')
+        plt.xscale('log')
+        plt.xlim(1e-4, 1.0)
+        plt.ylim(1e-4, 1.0)
     plt.grid()
     plt.show()
 
