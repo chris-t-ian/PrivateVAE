@@ -4,7 +4,7 @@ from p_vqvae.neural_spline_flow import OptimizedNSF
 from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
 from scipy.stats import multivariate_normal
 from torch.utils.data import ConcatDataset
-from sklearn.metrics import roc_curve
+from sklearn.metrics import roc_curve, auc
 import numpy as np
 import random
 import torch
@@ -99,7 +99,10 @@ class Challenger:
         """Sample N targets at once. Flip random bit b. If if b = 1: choose target in challenger dataset. If b = 0:
          choose t not in dataset and remove target from non-challenger data to avoid unintended membership.
          Return indices of targets and their membership label."""
-        random.seed()  # fresh seed
+        if test_mode:
+            random.seed(20)
+        else:
+            random.seed()  # fresh seed
 
         if _n >= n_atlas:  # take all ids as targets
             target_ids = [id for id in range(0, n_atlas)]
@@ -178,9 +181,13 @@ class AdversaryDOMIAS:
         self.tprs, self.fprs = self.roc_curve()
 
         print("auc: ", calculate_AUC(self.tprs, self.fprs))
+        print("auc (sklearn): ", auc(self.fprs, self.tprs))
 
     def sample_adversary_ids(self, n):
-        random.seed()  # fresh seed
+        if test_mode:
+            random.seed(40)
+        else:
+            random.seed()  # fresh seed
 
         if include_targets_in_reference_dataset is None:
             challenger_ids = self.challenger_ids.copy()
@@ -426,12 +433,12 @@ class AdversaryLiRA:
             out_ids = self.adversary_ids[model_id, :]
             out_syn_train_loader = self.create_reference_synthetic_dataset(out_ids, model_id, label=0)
             out_reference_model = self.train_reference_model(out_syn_train_loader, out_ids)
-            q_out[model_id, :] = self.predict(out_reference_model)
+            q_out[model_id, :] = self.predict(out_reference_model).ravel()  # all labels are the same
 
             in_ids = self.adversary_ids[model_id, :]
             in_syn_train_loader = self.create_reference_synthetic_dataset(in_ids, model_id, label=1)
             in_reference_model = self.train_reference_model(in_syn_train_loader, in_ids)
-            q_in[model_id, :] = self.predict(in_reference_model)
+            q_in[model_id, :] = self.predict(in_reference_model).ravel()
 
         q_in_mean, q_in_std = np.mean(q_in), np.std(q_in)
         q_out_mean, q_out_std = np.mean(q_out), np.std(q_out)
@@ -480,8 +487,8 @@ class AdversaryLiRA:
         raise NotImplementedError
 
     def create_reference_synthetic_dataset(self, ids, model_id, label=None):
-        # sha_key = "65674f68" if test_mode else subset_to_sha256_key(ids)
-        sha_key = subset_to_sha256_key(ids)
+        sha_key = "3cc5fefe" if (test_mode and label == 0) else subset_to_sha256_key(ids)
+        # sha_key = subset_to_sha256_key(ids)
         ds = AdversaryRawDataSet(ids, **self.raw_data_kwargs)
         adversary_train_loader = get_train_loader(ds, **self.vqvae_train_loader_kwargs)
 
@@ -601,9 +608,22 @@ class AdversaryLiRA:
 
 
 class AdversaryLiRAClassifier(AdversaryLiRA):
+    def __init__(
+        self,
+        _challenger: Challenger,
+        offline: bool = True,
+        n_reference_models: int = 2,  # reference models for in or out world
+        background_knowledge: float = 0.0,
+        shadow_model_train_loader_kwargs: dict = None,
+        membership_classifier_kwargs: dict = None,
+    ):
+        self.membership_classifier_kwargs = membership_classifier_kwargs
+        super().__init__(_challenger, offline, n_reference_models, background_knowledge,
+                         shadow_model_train_loader_kwargs)
+
     def train_reference_model(self, data_loader, ids=None):
         """Train membership classifier."""
-        classifier = MembershipClassifier(data_loader)
+        classifier = MembershipClassifier(data_loader, **self.membership_classifier_kwargs)
         saving_keys = {"adversary": "LiRA_classifier", "syn": "", "sha": f"{subset_to_sha256_key(ids)}"}
 
         if classifier.model_exists(**saving_keys):
@@ -643,7 +663,7 @@ class AdversaryLiRAClassifier(AdversaryLiRA):
 class AdversaryLiRANSF(AdversaryLiRA):
     def train_reference_model(self, data_loader, ids=None):
         """Train NSF."""
-        assert ids
+        assert ids is not None
         nsf = OptimizedNSF(data_loader)
         saving_keys = {"adversary": "LiRA_NSF", "syn": "", "sha": f"{subset_to_sha256_key(ids)}"}
 
@@ -658,9 +678,10 @@ class AdversaryLiRANSF(AdversaryLiRA):
     def predict(self, model):
         loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augment_flag=False, num_workers=1)
         log_p_s = []
-        for img in loader:
-            print("img.shape: ", img.shape)
-            log_p_s.append(model.eval_log_density(img))
+        for batch in loader:
+            # print("img.shape: ", img.shape)
+            img = batch["image"]
+            log_p_s.append(model.eval_log_density(img).cpu())
         return np.array(log_p_s)
 
 
