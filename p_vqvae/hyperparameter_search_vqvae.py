@@ -112,3 +112,5 @@ if __name__ == '__main__':
 
     # Save to CSV
     df_results.to_csv(hyperparameter_log, index=False)
+
+    # TODO: show model architecture using: from torchsummary import summary

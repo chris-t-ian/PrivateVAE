@@ -2,7 +2,7 @@ import optuna
 import torch
 import pandas as pd
 
-from p_vqvae.dataloader import DataSet, get_train_val_loader
+from p_vqvae.dataloader import RawDataSet, get_train_val_loader
 from p_vqvae.neural_spline_flow import NSF
 
 data_mode = "raw"  # TODO: implement hyperparameter search for raw and for synthetic data
@@ -64,10 +64,10 @@ def objective_vqvae(trial):
     learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
     cosine_annealing = trial.suggest_categorical("cosine_annealing", [True, False])
     hidden_channels = trial.suggest_categorical("hidden_channels", [64, 128, 256])
-    num_bins = trial.suggest_categorical("num_bins", [4, 6, 8])
+    num_bins = trial.suggest_categorical("num_bins", [4, 6])
 
     if data_mode == "raw":
-        dataset = DataSet("half", **data_kwargs)
+        dataset = RawDataSet("half", **data_kwargs)
     else:
         raise NotImplementedError
 
@@ -83,7 +83,7 @@ def objective_vqvae(trial):
         num_bins=num_bins,
         **nsf_kwargs
     )
-    best_val_log_prob = nsf.train()
+    best_val_log_prob = nsf.train(clear_mem=True)
 
     return best_val_log_prob
 
