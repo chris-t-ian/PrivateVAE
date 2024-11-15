@@ -119,12 +119,12 @@ def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, 
     else:
         plt.plot(fprs, tprs, label=f'AUC = {auc:.4f}')
 
-    if tprs2 and fprs2:
+    if tprs2 is not None and fprs2 is not None:
         assert label and label2, "Specify labels."
         auc = calculate_AUC(tprs2, fprs2)
         plt.plot(fprs2, tprs2, label=f'{label2} (AUC = {auc:.4f})')
 
-    if tprs3 and fprs3:
+    if tprs3 is not None and fprs3 is not None:
         assert label3, "Specify label 3"
         auc = calculate_AUC(tprs3, fprs3)
         plt.plot(fprs3, tprs3, label=f'{label3} (AUC = {auc:.4f})')
