@@ -13,7 +13,7 @@ from monai.inferers import VQVAETransformerInferer
 
 
 class BaseModel:
-    def __init__(self, model, model_path=None, base_filename="", device=None, seed=None):
+    def __init__(self, model, model_path=None, base_filename="", device=None, device_ids=None, seed=None):
         self.trained_flag = False
         self.model_path = model_path
         self.base_filename = base_filename
@@ -27,6 +27,9 @@ class BaseModel:
             torch.cuda.seed_all()  # set fresh random seed
         elif seed is None and self.device == "cpu":
             torch.seed()  # set fresh random seed
+
+        if device_ids is not None:
+            model = torch.nn.DataParallel(model, device_ids=device_ids)
 
         self.model = model.to(self.device)
 
@@ -256,11 +259,11 @@ class VQ_VAE(BaseModel):
         early_stopping_patience=float('inf'),  # stop training after ... training steps of not improving val loss
         n_example_images=4,  # how many example reconstructions to save in self.final_reconstructions
         dtype=torch.float32,  #
-        multiple_devices=True,
         use_checkpointing=True,
         model_path=None,
         seed=None,
         device=None,
+        device_ids: list = None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -280,7 +283,6 @@ class VQ_VAE(BaseModel):
         self.val_interval = 1 if early_stopping_patience else val_interval
         self.early_stopping_patience = early_stopping_patience
         self.n_example_images = n_example_images
-        self.multiple_devices = multiple_devices
         self.use_checkpointing = use_checkpointing
         self.dtype = dtype
         self.reconstruction_loss = reconstruction_loss
@@ -291,7 +293,7 @@ class VQ_VAE(BaseModel):
         self.final_reconstructions = None
         self.images = None
         model = self._init_model()
-        super().__init__(model, model_path, "VQVAE", device, seed)
+        super().__init__(model, model_path, "VQVAE", device, device_ids, seed)
 
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
 
@@ -311,9 +313,6 @@ class VQ_VAE(BaseModel):
             commitment_cost=self.commitment_cost,
         )
 
-        # use all GPUS if available
-        if self.multiple_devices and torch.cuda.is_available():
-            model = torch.nn.DataParallel(model)
         return model
 
     def train(self):
@@ -329,7 +328,6 @@ class VQ_VAE(BaseModel):
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
                 images = batch['image'].to(self.device, dtype=self.dtype)
-
                 self.optimizer.zero_grad(set_to_none=True)
 
                 reconstruction, quantization_loss = self.model(images=images)
@@ -343,6 +341,9 @@ class VQ_VAE(BaseModel):
                 recons_loss = self.reconstruction_loss(reconstruction.to(torch.float16), images)
                 loss = recons_loss + quantization_loss
 
+                if "DataParallel" in str(type(self.model)):
+                    loss = loss.mean()
+
                 loss.backward()
                 self.optimizer.step()
 
@@ -351,11 +352,11 @@ class VQ_VAE(BaseModel):
                 progress_bar.set_postfix(
                     {
                         "recons_loss": epoch_loss / (step + 1),
-                        "quantization_loss": quantization_loss.item() / (step + 1),
+                        "quantization_loss": quantization_loss / (step + 1),
                     }
                 )
             self.epoch_recon_loss_list.append(epoch_loss / (step + 1))
-            self.epoch_quant_loss_list.append(quantization_loss.item() / (step + 1))
+            self.epoch_quant_loss_list.append(quantization_loss[0].item() / (step + 1))
 
             if (epoch + 1) % self.val_interval == 0 and self.val_loader:
                 val_loss = self.validate()
@@ -438,7 +439,7 @@ class VQ_VAE(BaseModel):
 class TransformerDecoder_VQVAE(BaseModel):
     def __init__(
         self,
-        vqvae_model,
+        vqvae,
         train_loader,
         val_loader=None,
         attn_layers_dim=96,
@@ -449,16 +450,20 @@ class TransformerDecoder_VQVAE(BaseModel):
         val_interval=10,
         early_stopping_patience=float('inf'),  # stop training after this many  training steps of not improving val loss
         dtype=torch.float32,
-        multiple_devices=False,
         model_path=None,
         seed=None,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        device_ids: list = None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.vqvae_model = vqvae_model.model
         self.dtype = dtype
         self.device = device
+
+        if "DataParallel" in str(type(vqvae.model)):
+            self.vqvae_model = vqvae.model.module.to(device=self.device)
+        else:
+            self.vqvae_model = vqvae.model.to(device=self.device)
 
         # Transformer hyperparameters
         self.attn_layers_dim = attn_layers_dim
@@ -469,7 +474,6 @@ class TransformerDecoder_VQVAE(BaseModel):
 
         self.val_interval = val_interval
         self.early_stopping_patience = early_stopping_patience
-        self.multiple_devices = multiple_devices
         self.ce_loss = CrossEntropyLoss()
         self.calculate_intermediate_reconstructions = False
         self.model_path = model_path
@@ -481,15 +485,15 @@ class TransformerDecoder_VQVAE(BaseModel):
         self.inferer = VQVAETransformerInferer()
         transformer_model = self._init_model()
         self.seed = seed
-        super().__init__(transformer_model, model_path, "transformer_VQVAE", device, seed)
+        super().__init__(transformer_model, model_path, "transformer_VQVAE", device, device_ids, seed)
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
-            next(iter(self.train_loader))['image'].to(device=device)).shape[2:]
+            next(iter(self.train_loader))['image'].to(device=device, dtype=self.dtype)).shape[2:]
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
             spatial_dims=3,
             dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
-                next(iter(train_loader))['image'].to(device=device)).shape[2:],
+                next(iter(train_loader))['image'].to(device=device, dtype=self.dtype)).shape[2:],
         )
 
     def _init_model(self):
@@ -509,10 +513,7 @@ class TransformerDecoder_VQVAE(BaseModel):
             attn_layers_depth=self.attn_layers_depth,
             attn_layers_heads=self.attn_layers_heads,
         )
-        # use all GPUS if available
-        if self.multiple_devices and torch.cuda.is_available():
-            model = torch.nn.DataParallel(model)
-        model = model.to(self.device, dtype=self.dtype)
+
         return model
 
     def train(self):
@@ -548,7 +549,7 @@ class TransformerDecoder_VQVAE(BaseModel):
             self.epoch_ce_loss_list.append(epoch_loss / (step + 1))
 
             if (epoch + 1) % self.val_interval == 0 and self.val_loader:
-                val_loss = self.validate(epoch)
+                val_loss = self.validate()
 
                 # early stopping
                 if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
@@ -635,6 +636,7 @@ class TransformerDecoder_VQVAE(BaseModel):
                     starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
                     temperature=temperature,
                 )
+                print("inferer device: ", self.inferer.device)
                 generated_image = sample[0, 0].cpu().numpy()
                 generated_images.append(generated_image)
 
