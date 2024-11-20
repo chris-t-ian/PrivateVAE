@@ -324,4 +324,4 @@ def get_train_loader(
     transform = get_augmentation() if augment_flag else ToTensor()
     dataset.transform = transform
 
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
