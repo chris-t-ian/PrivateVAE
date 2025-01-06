@@ -1,3 +1,5 @@
+import os.path
+
 import matplotlib.pyplot as plt
 import numpy as np
 from torch import Tensor, get_device
@@ -24,7 +26,7 @@ def get3d_middle_slices(x):
     return np.concatenate([image_0, image_1], axis=0)
 
 
-def plot_generated_images(img: np.array, n=3):
+def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.png"):
 
     img = check_and_remove_channel_dimension(img)
 
@@ -42,7 +44,8 @@ def plot_generated_images(img: np.array, n=3):
             ax[i].axis("off")
             ax[i].title.set_text(f"Synthetic image {i}")
 
-    plt.show()
+    plt.savefig(file)
+    plt.clf()
 
 
 def plot_reconstructions(img: np.array, reconstructions: np.array, n=1):
@@ -80,7 +83,8 @@ def plot_reconstructions(img: np.array, reconstructions: np.array, n=1):
             ax[1, i].axis("off")
             ax[1, i].title.set_text(f"Real image {i}")
 
-    plt.show()
+    plt.savefig("data/plots/reconstructions.png")
+    plt.clf()
 
 
 def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.array, k=0):
@@ -112,32 +116,64 @@ def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.ar
 
 
 def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None,
-                   low_fprs=False):
+                   low_fprs=False, save=True):
     auc = calculate_AUC(tprs, fprs)
     if label:
-        plt.plot(fprs, tprs, label=f'{label} (AUC = {auc:.4f})')
+        plt.plot(fprs, tprs, label=f'{label} (AUC = {auc:.3f})')
     else:
-        plt.plot(fprs, tprs, label=f'AUC = {auc:.4f}')
+        plt.plot(fprs, tprs, label=f'AUC = {auc:.3f}')
 
     if tprs2 is not None and fprs2 is not None:
         assert label and label2, "Specify labels."
         auc = calculate_AUC(tprs2, fprs2)
-        plt.plot(fprs2, tprs2, label=f'{label2} (AUC = {auc:.4f})')
+        plt.plot(fprs2, tprs2, label=f'{label2} (AUC = {auc:.3f})')
 
     if tprs3 is not None and fprs3 is not None:
         assert label3, "Specify label 3"
         auc = calculate_AUC(tprs3, fprs3)
-        plt.plot(fprs3, tprs3, label=f'{label3} (AUC = {auc:.4f})')
+        plt.plot(fprs3, tprs3, label=f'{label3} (AUC = {auc:.3f})')
 
     plt.plot([0, 1], [0, 1], linestyle='--', color='gray')  # Diagonal line for random chance
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.legend(loc='lower right')
+
     if low_fprs:
         plt.yscale('log')
         plt.xscale('log')
-        plt.xlim(1e-4, 1.0)
-        plt.ylim(1e-4, 1.0)
-    plt.grid()
-    plt.show()
+        plt.xlim(1e-3, 1.0)
+        plt.ylim(1e-3, 1.0)
 
+    plt.subplots_adjust(left= , bottom=0.5)
+    file_path = f"data/plots/ROC_{label}_{label2}_{label3}_lowfprs{low_fprs}.png"
+    plt.grid()
+    if save:
+        print("saving plot as ", file_path)
+        plt.savefig(file_path)
+        plt.clf()
+
+def show_roc_curve_std(std1, std2=None, std3=None, file_path="data/plots", **kwargs):
+    show_roc_curve(**kwargs, save=False)
+    tprs = kwargs["tprs"]
+
+    plt.fill_between(kwargs["fprs"], tprs + std1, tprs - std1, alpha=0.3, color='#888888')
+    if std2 is not None:
+        tprs2 = kwargs["tprs2"]
+        plt.fill_between(kwargs["fprs2"], tprs2 + std2, tprs2 - std2, alpha=0.3, color='#888888')
+    if std3 is not None:
+        tprs3 = kwargs["tprs3"]
+        plt.fill_between(kwargs["fprs3"], tprs3 + std3, tprs3 - std3, alpha=0.3, color='#888888')
+
+    log_scale_label = "log" if kwargs.get("low_fprs") else ""
+    file_path = os.path.join(file_path, f"ROC_std_{kwargs['label']}_{log_scale_label}.png")
+    plt.savefig(file_path)
+    plt.clf()
+
+def show_auc_tpr_plot(x_values, mean_auc, std_auc=None, xlabel=" ", ylabel="AUC"):
+    fig, ax = plt.subplots(nrows=1, ncols=1)
+    fig.set_size_inches(6, 6)
+    ax.plot(x_values, mean_auc, yerr=std_auc, color="blue", ecolor='#888888')
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel)
+    plt.savefig(f"data/plots/{xlabel}_{ylabel}.png")
+    plt.clf()
