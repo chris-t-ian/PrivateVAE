@@ -88,6 +88,18 @@ class BaseModel:
         full_path = self.get_full_path(**kwargs)
         if os.path.exists(full_path):
             state_dict = torch.load(full_path)
+
+            if "module" in state_dict.keys():
+                from collections import OrderedDict
+                new_state_dict = OrderedDict()
+
+                for key, value in state_dict.items():
+                    new_key = key.replace("module.", "")  # Remove 'module.' from the key
+                    new_state_dict[new_key] = value
+                    print("removing")
+
+                state_dict = new_state_dict
+
             self.model.load_state_dict(state_dict)
             self.trained_flag = True
             print(f"Model loaded from {full_path}")
@@ -356,9 +368,9 @@ class VQ_VAE(BaseModel):
                     }
                 )
             self.epoch_recon_loss_list.append(epoch_loss / (step + 1))
-            self.epoch_quant_loss_list.append(quantization_loss[0].item() / (step + 1))
+            # self.epoch_quant_loss_list.append(quantization_loss[0].item() / (step + 1))
 
-            if (epoch + 1) % self.val_interval == 0 and self.val_loader:
+            if epoch % self.val_interval == 0 and self.val_loader:
                 val_loss = self.validate()
 
                 if self.early_stopping_patience != float('inf') and val_loss < best_val_loss:
@@ -369,7 +381,12 @@ class VQ_VAE(BaseModel):
                     epochs_without_improvement += 1
 
             if epochs_without_improvement >= self.early_stopping_patience:
-                print(f"Early stopping at epoch {epoch + 1}.")
+                best_epoch = epoch - (self.val_interval * epochs_without_improvement)
+                print(f"Early stopping at epoch {epoch}. Loading weights of epoch {best_epoch}. ")
+
+                with open(os.path.join(self.model_path, "VQVAE_early_stopping.txt") , 'w') as f:
+                    f.write(f"Early stopping at epoch {best_epoch}. Best val loss at epoch {best_epoch}. \n"
+                            f"Path: {self.model_path}")
 
                 if best_model_weights:
                     print("Loading best model weights so far.")
@@ -385,7 +402,7 @@ class VQ_VAE(BaseModel):
 
         self.trained_flag = True
 
-        return val_loss
+        return best_val_loss
 
     def validate(self):
         self.model.eval()
@@ -453,17 +470,19 @@ class TransformerDecoder_VQVAE(BaseModel):
         model_path=None,
         seed=None,
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        vqvae_device=None,
         device_ids: list = None,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.dtype = dtype
         self.device = device
+        self.vqvae_device = device if vqvae_device is None else vqvae_device
 
-        if "DataParallel" in str(type(vqvae.model)):
-            self.vqvae_model = vqvae.model.module.to(device=self.device)
+        if "parallel" in str(type(vqvae.model)):
+            self.vqvae_model = vqvae.model.module.to(device=vqvae_device)
         else:
-            self.vqvae_model = vqvae.model.to(device=self.device)
+            self.vqvae_model = vqvae.model.to(device=vqvae_device)
 
         # Transformer hyperparameters
         self.attn_layers_dim = attn_layers_dim
@@ -488,16 +507,16 @@ class TransformerDecoder_VQVAE(BaseModel):
         super().__init__(transformer_model, model_path, "transformer_VQVAE", device, device_ids, seed)
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
-            next(iter(self.train_loader))['image'].to(device=device, dtype=self.dtype)).shape[2:]
+            next(iter(self.train_loader))['image'].to(device=self.vqvae_device, dtype=self.dtype)).shape[2:]
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
             spatial_dims=3,
             dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
-                next(iter(train_loader))['image'].to(device=device, dtype=self.dtype)).shape[2:],
+                next(iter(train_loader))['image'].to(device=self.vqvae_device, dtype=self.dtype)).shape[2:],
         )
 
     def _init_model(self):
-        test_scan = next(iter(self.train_loader))['image'].to(self.device, dtype=self.dtype)
+        test_scan = next(iter(self.train_loader))['image'].to(self.vqvae_device, dtype=self.dtype)
         spatial_shape = self.vqvae_model.encode_stage_2_inputs(test_scan).shape[2:]
 
         # define maximum sequence length
@@ -517,7 +536,6 @@ class TransformerDecoder_VQVAE(BaseModel):
         return model
 
     def train(self):
-        val_loss = None
         best_val_loss = float("inf")
         epochs_without_improvement = 0
         best_model_weights = None
@@ -546,9 +564,10 @@ class TransformerDecoder_VQVAE(BaseModel):
                 epoch_loss += loss.item()
 
                 progress_bar.set_postfix({"ce_loss": epoch_loss / (step + 1)})
+
             self.epoch_ce_loss_list.append(epoch_loss / (step + 1))
 
-            if (epoch + 1) % self.val_interval == 0 and self.val_loader:
+            if epoch % self.val_interval == 0 and self.val_loader:
                 val_loss = self.validate()
 
                 # early stopping
@@ -560,7 +579,12 @@ class TransformerDecoder_VQVAE(BaseModel):
                     epochs_without_improvement += 1
 
             if epochs_without_improvement >= self.early_stopping_patience:
-                print(f"Early stopping at epoch {epoch + 1}.")
+                best_epoch = epoch - (self.val_interval * epochs_without_improvement)
+                print(f"Early stopping at epoch {epoch}. Loading weights of epoch {best_epoch}.")
+
+                with open(os.path.join(self.model_path, "VQVAE_early_stopping.txt") , 'w') as f:
+                    f.write(f"Early stopping at epoch {best_epoch}. Best val loss at epoch {best_epoch}. \n"
+                            f"Path: {self.model_path}")
 
                 if best_model_weights:
                     print("Loading best model weights so far.")
@@ -573,7 +597,7 @@ class TransformerDecoder_VQVAE(BaseModel):
 
         self.trained_flag = True
 
-        return val_loss
+        return best_val_loss
 
     def validate(self):
         self.model.eval()
@@ -623,8 +647,9 @@ class TransformerDecoder_VQVAE(BaseModel):
         generated_images = []
 
         seed_used = torch.initial_seed() if self.device == "cpu" else torch.cuda.initial_seed()
-        if self.seed is not None:
-            assert seed_used == self.seed, f"Used seed {seed_used} is different than set seed {self.seed}"
+        if seed_used != self.seed:
+            torch.manual_seed(self.seed)
+            torch.cuda.manual_seed(self.seed)
 
         with torch.no_grad():
             for i in range(num_images):
@@ -636,7 +661,6 @@ class TransformerDecoder_VQVAE(BaseModel):
                     starting_tokens=self.vqvae_model.num_embeddings * torch.ones((1, 1), device=self.device),
                     temperature=temperature,
                 )
-                print("inferer device: ", self.inferer.device)
                 generated_image = sample[0, 0].cpu().numpy()
                 generated_images.append(generated_image)
 
@@ -644,10 +668,106 @@ class TransformerDecoder_VQVAE(BaseModel):
         return np.expand_dims(generated_images, axis=1)
 
 
-def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, transformer_training_kwargs: dict,
-                                saving_kwargs: dict, seed=None):
+class ResidualBlock(torch.nn.Module):
+    """A general-purpose residual block. Works only with 1-dim inputs.
+    Source: https://github.com/bayesiains/nflows/blob/master/nflows/nn/nets/resnet.py"""
 
-    vqvae = VQ_VAE(train_loader, seed=seed, **vqvae_training_kwargs)
+    def __init__(
+            self,
+            features,
+            context_features,
+            activation=torch.nn.functional.relu,
+            dropout_probability=0.0,
+            use_batch_norm=False,
+            zero_initialization=True,
+    ):
+        super().__init__()
+        self.activation = activation
+
+        self.use_batch_norm = use_batch_norm
+        if use_batch_norm:
+            self.batch_norm_layers = torch.nn.ModuleList(
+                [torch.nn.BatchNorm1d(features, eps=1e-3) for _ in range(2)]
+            )
+        if context_features is not None:
+            self.context_layer = torch.nn.Linear(context_features, features)
+        self.linear_layers = torch.nn.ModuleList(
+            [torch.nn.Linear(features, features) for _ in range(2)]
+        )
+        self.dropout = torch.nn.Dropout(p=dropout_probability)
+        if zero_initialization:
+            torch.nn.init.uniform_(self.linear_layers[-1].weight, -1e-3, 1e-3)
+            torch.nn.init.uniform_(self.linear_layers[-1].bias, -1e-3, 1e-3)
+
+    def forward(self, inputs, context=None):
+        temps = inputs
+        if self.use_batch_norm:
+            temps = self.batch_norm_layers[0](temps)
+        temps = self.activation(temps)
+        temps = self.linear_layers[0](temps)
+        if self.use_batch_norm:
+            temps = self.batch_norm_layers[1](temps)
+        temps = self.activation(temps)
+        temps = self.dropout(temps)
+        temps = self.linear_layers[1](temps)
+        if context is not None:
+            temps = torch.nn.functional.glu(torch.cat((temps, self.context_layer(context)), dim=1), dim=1)
+        return inputs + temps
+
+
+class ResidualNet(torch.nn.Module):
+    """A general-purpose residual network. Works only with 1-dim inputs.
+    Source: https://github.com/bayesiains/nflows/blob/master/nflows/nn/nets/resnet.py"""
+
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            hidden_features,
+            context_features=None,
+            num_blocks=2,
+            activation=torch.nn.functional.relu,
+            dropout_probability=0.0,
+            use_batch_norm=False,
+    ):
+        super().__init__()
+        self.hidden_features = hidden_features
+        self.context_features = context_features
+        if context_features is not None:
+            self.initial_layer = torch.nn.Linear(
+                in_features + context_features, hidden_features
+            )
+        else:
+            self.initial_layer = torch.nn.Linear(in_features, hidden_features)
+        self.blocks = torch.nn.ModuleList(
+            [
+                ResidualBlock(
+                    features=hidden_features,
+                    context_features=context_features,
+                    activation=activation,
+                    dropout_probability=dropout_probability,
+                    use_batch_norm=use_batch_norm,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.final_layer = torch.nn.Linear(hidden_features, out_features)
+
+    def forward(self, inputs, context=None):
+        if context is None:
+            temps = self.initial_layer(inputs)
+        else:
+            temps = self.initial_layer(torch.cat((inputs, context), dim=1))
+        for block in self.blocks:
+            temps = block(temps, context=context)
+        outputs = self.final_layer(temps)
+        return outputs
+
+
+def train_transformer_and_vqvae(train_loader, vqvae_kwargs: dict, transformer_kwargs: dict,
+                                saving_kwargs: dict, val_loader=None, seed=None, return_vqvae=False):
+
+    vqvae = VQ_VAE(train_loader, val_loader, seed=seed, **vqvae_kwargs)
     if vqvae.model_exists(**saving_kwargs):
         print("vqvae model already saved")
         vqvae.load(**saving_kwargs)
@@ -655,11 +775,14 @@ def train_transformer_and_vqvae(train_loader, vqvae_training_kwargs: dict, trans
         vqvae.train()
         vqvae.save(**saving_kwargs)
 
-    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, seed=seed, **transformer_training_kwargs)
+    t_vqvae = TransformerDecoder_VQVAE(vqvae, train_loader, val_loader, seed=seed, **transformer_kwargs)
     if t_vqvae.model_exists(**saving_kwargs):
         t_vqvae.load(**saving_kwargs)
     else:
         t_vqvae.train()
         t_vqvae.save(**saving_kwargs)
 
-    return t_vqvae
+    if return_vqvae:
+        return t_vqvae, vqvae
+    else:
+        return t_vqvae
