@@ -1,6 +1,8 @@
 import math
 import time
 import nflows
+from monai.transforms import Compose
+from torch.nn.functional import embedding
 from tqdm import tqdm
 from nflows.distributions import StandardNormal
 from nflows.transforms.splines import rational_quadratic_spline
@@ -15,34 +17,30 @@ from nflows.transforms.permutations import RandomPermutation
 import torch
 
 from p_vqvae.dataloader import DataSet, get_train_val_loader, load_batches
-from p_vqvae.networks import BaseModel
+from p_vqvae.networks import BaseModel, ResidualNet
 
+device = "cuda:4"
 
 data_kwargs = {
-    "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
-    "cache_path": '/hobme/chrsch/P_VQVAE/data/cache/',
+    "root":"data/ATLAS_2",
+    "cache_path":"data/cache",
     "downsample": 4,
     "normalize": 1,
     "crop": ((8, 9), (12, 13), (0, 9)),
     "padding": ((1, 2), (0, 0), (1, 2)),
 }
-train_loader_kwargs = {
-    "batch_size": 1,
-    "augment_flag": True,
-    "num_workers": 2
-}
 model_params = {
-    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
-    "device": "cuda",
-    "eval_interval": 20,  # after how many steps evaluate on validation set
-    "early_stopping": 4,  # after how many evaluation steps stop the training
+    "model_path": "model_outputs/mia",
+    "device": device,
+    "eval_interval": 10,  # after how many steps evaluate on validation set, before: 20
+    "early_stopping": float('inf'),  # after how many evaluation steps stop the training
     "steps_per_level": 10,
     "levels": 2,  # increase for non-downsampled dataset
     "multi_scale": True,
-    "actnorm": False,
+    "actnorm": True,
 }
 _spline_params = {
-        'num_bins': 4,
+        'num_bins': 4,  #
         'tail_bound': 1.,
         'min_bin_width': 1e-3,
         'min_bin_height': 1e-3,
@@ -50,11 +48,14 @@ _spline_params = {
         'apply_unconditional_transform': False
 }
 optimization = {
-    "batch_size": 8,
-    "learning_rate": 1e-5,
-    "cosine_annealing": False,
+    "epochs": 400, #400,
+#    "batch_size": 16, #
+    "learning_rate": 4e-4,
+    "cosine_annealing": True,
     "eta_min": 0.,
-    "num_steps": 1000,  # change in implementation
+#    "num_steps": 1000,  # change in implementation
+    "mask_type": "alternating",
+    "one_by_one_conv": True,
 }
 coupling_transform = {
     "coupling_layer_type": 'rational_quadratic_spline',
@@ -108,7 +109,7 @@ class _CompositeTransform(CompositeTransform):
 
 
 def create_transform_step(num_channels, hidden_channels, actnorm, spline_params, coupling_layer_type,
-                          use_resnet, dropout_prob, num_bins, steps_per_level=None):
+                          use_resnet, dropout_prob, num_bins, one_b_one_conv=True, mask_type="mid_split", iteration=0):
     if use_resnet:
         raise NotImplementedError
     else:
@@ -118,9 +119,12 @@ def create_transform_step(num_channels, hidden_channels, actnorm, spline_params,
         def create_convnet(in_channels, out_channels):
             return ConvNet(in_channels, out_channels, hidden_channels=hidden_channels)
 
-    mask = nflows.utils.create_mid_split_binary_mask(num_channels)
-    # print("mask.shape: ", mask.shape)  # debugging print
-    # print("Number of ones in mask:", mask.sum())
+    if mask_type == "mid_split":
+        mask = nflows.utils.create_mid_split_binary_mask(num_channels)
+    elif mask_type == "alternating":
+        mask = nflows.utils.create_alternating_binary_mask(num_channels, even=(iteration % 2 == 0))
+    else:
+        raise NotImplementedError(f"mask_type {mask_type} not supported.")
 
     if coupling_layer_type == 'rational_quadratic_spline':
         coupling_layer = PiecewiseRationalQuadraticCouplingTransform(
@@ -142,10 +146,10 @@ def create_transform_step(num_channels, hidden_channels, actnorm, spline_params,
     if actnorm:
         step_transforms.append(ActNorm(num_channels))
 
-    step_transforms.extend([
-        OneByOneConvolution(num_channels),
-        coupling_layer
-    ])
+    if one_b_one_conv:
+        step_transforms.append(OneByOneConvolution(num_channels))
+
+    step_transforms.append(coupling_layer)
 
     return _CompositeTransform(step_transforms)
 
@@ -314,8 +318,8 @@ class ActNorm(_ActNorm):
             std = inputs.std(dim=0)
             std = torch.clamp(std, min=epsilon)  # added small epsilon so that
             mu = (inputs / std).mean(dim=0)
-            print("std: ", std)
-            print("mu: ", mu)
+            # print("std: ", std)
+            # print("mu: ", mu)
 
             self.log_scale.data = -torch.log(std)
 
@@ -328,7 +332,7 @@ class ActNorm(_ActNorm):
             if torch.isnan(self.log_scale).any():
                 print(f"log scale has {torch.sum(torch.isnan(self.log_scale))}"
                       f"inf values. Total values: {torch.numel(self.log_scale)}")
-            print(self.log_scale.data)
+            # print(self.log_scale.data)
             self.shift.data = -mu
             self.initialized.data = torch.tensor(True, dtype=torch.bool)
 
@@ -487,15 +491,18 @@ class NSF(BaseModel):
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 
         # Optimization
-        batch_size=256,
+        epochs = 100,
         learning_rate=1e-4,
         cosine_annealing=False,
         eta_min=0.,
-        num_steps=100000,
         num_bins=4,
+        num_steps=None,
+        squeeze_factor: int = 2,
 
         # coupling_transform
+        mask_type = "mid_split",
         coupling_layer_type='rational_quadratic_spline',
+        one_by_one_conv = True,
         hidden_channels=256,
         use_resnet=False,
         num_res_blocks=5,  # If using resnet
@@ -508,7 +515,7 @@ class NSF(BaseModel):
     ):
         self.train_loader = _train_loader
         self.val_loader = _val_loader
-        self.shape = next(iter(self.train_loader))['image'].shape
+        self.shape = self.get_shape()
 
         # model params
         self.steps_per_level = steps_per_level
@@ -518,15 +525,19 @@ class NSF(BaseModel):
         self.device = device
 
         # optimization, training params
-        self.batch_size = batch_size
+        self.epochs = epochs
+        self.batch_size = _train_loader.batch_size
+        self.max_num_steps = epochs * _train_loader.batch_size if num_steps is None else num_steps
         self.learning_rate = learning_rate
         self.cosine_annealing = cosine_annealing
         self.eval_interval = eval_interval
         self.early_stopping_patience = early_stopping
         self.eta_min = eta_min
-        self.num_steps = num_steps
+        self.squeeze_factor = squeeze_factor
 
         # Coupling transform net
+        self.mask_type = mask_type
+        self.one_by_one_conv = one_by_one_conv
         self.num_bins = num_bins
         self.coupling_layer_type = coupling_layer_type
         self.hidden_channels = hidden_channels
@@ -536,12 +547,18 @@ class NSF(BaseModel):
         self.dropout_prob = dropout_prob
         self.spline_parameters = spline_parameters
 
+        self.log_density_list = []
+        self.val_log_density_list = []
+        self.loss_list = []
+        self.val_loss_list = []
         self.flow_checkpoint = None
         self.optimizer_checkpoint = None
-        self.start_step = 0
 
         self.model = self.create_flow()
         super().__init__(self.model, model_path=model_path, base_filename="NSF", device=device, seed=seed)
+
+    def get_shape(self):
+        return next(iter(self.train_loader))['image'].shape
 
     def create_flow(self):
         c, h, w, d = self.shape[1:]
@@ -562,15 +579,16 @@ class NSF(BaseModel):
         if self.multi_scale:
             mct = MultiscaleCompositeTransform(num_transforms=self.levels)
             for level, level_hidden_channels in zip(range(self.levels), self.hidden_channels):
-                squeeze_transform = SqueezeTransform()
-                c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
+                if self.squeeze_factor > 1:
+                    squeeze_transform = SqueezeTransform()
+                    c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
                                                         self.coupling_layer_type, self.use_resnet, self.dropout_prob,
-                                                        self.num_bins)
-                                  for _ in range(self.steps_per_level)]
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step)
+                                  for step in range(self.steps_per_level)]
 
-                transform_pipeline = [squeeze_transform]
+                transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
                 transform_pipeline.extend(transform_step)
                 transform_pipeline.append(OneByOneConvolution(c))
                 transform_level = _CompositeTransform(transform_pipeline)
@@ -582,15 +600,16 @@ class NSF(BaseModel):
             all_transforms = []
 
             for level, level_hidden_channels in zip(range(self.levels), self.hidden_channels):
-                squeeze_transform = SqueezeTransform()
-                c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
+                if self.squeeze_factor > 1:
+                    squeeze_transform = SqueezeTransform()
+                    c, h, w, d = squeeze_transform.get_output_shape(c, h, w, d)
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
                                                         self.coupling_layer_type, self.use_resnet, self.dropout_prob,
-                                                        self.num_bins)
-                                  for _ in range(self.steps_per_level)]
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step)
+                                  for step in range(self.steps_per_level)]
 
-                transform_pipeline = [squeeze_transform]
+                transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
                 transform_pipeline.extend(transform_step)
                 transform_pipeline.append(OneByOneConvolution(c))
                 transform_level = _CompositeTransform(transform_pipeline)
@@ -605,7 +624,7 @@ class NSF(BaseModel):
         # Inputs to the model in [0, 2 ** num_bits]
         return mct
 
-    def train(self, clear_mem=False, **save_kwargs):
+    def train(self, clear_mem=False):
         evals_without_improvement = 0
         best_model_weights = None
         c, h, w, d = self.shape[1:]
@@ -622,50 +641,54 @@ class NSF(BaseModel):
         if self.cosine_annealing:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer=optimizer,
-                T_max=self.num_steps,
-                last_epoch=-1 if self.start_step == 0 else self.start_step,
+                T_max=self.max_num_steps,
+                last_epoch=-1,
                 eta_min=self.eta_min
             )
         else:
             scheduler = None
 
         best_val_log_prob = None
-        start_time = None
-        num_batches = self.num_steps - self.start_step
 
-        progress_bar = tqdm(enumerate(load_batches(loader=self.train_loader, n_batches=num_batches)),
-                            total=num_batches, ncols=110)
-        progress_bar.set_description(f"Step ")
-
-        for step, batch in progress_bar:
-            if step == 0:
-                start_time = time.time()  # Runtime estimate will be more accurate if set here.
-
+        for epoch in range(self.epochs):
             self.model.train()
 
-            optimizer.zero_grad()
+            epoch_log_density = []
+            epoch_loss = []
+            progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
+            progress_bar.set_description(f"Epoch {epoch}")
 
-            batch = batch['image'].to(dtype=torch.float32, device=self.device)  # .to(self.device)
+            for step, batch in progress_bar:
 
-            assert batch.numel() > 0, "Empty batch encountered!"
+                optimizer.zero_grad()
 
-            log_density = self.model.log_prob(batch)
+                batch = batch['image'].to(dtype=torch.float32, device=self.device)  # .to(self.device)
+                assert batch.numel() > 0, "Empty batch encountered!"
 
-            loss = -nats_to_bits_per_dim(torch.mean(log_density), c, h, w, d)
-            progress_bar.set_postfix({"loss": loss})
+                log_density = self.model.log_prob(batch)
 
-            loss.backward()
-            optimizer.step()
+                loss = -nats_to_bits_per_dim(torch.mean(log_density), c, h, w, d)  # why torch.mean?
+                progress_bar.set_postfix({"loss": loss})
 
-            if scheduler is not None:
-                scheduler.step()
+                epoch_loss.append(loss)
+                epoch_log_density.append(float(torch.mean(log_density).cpu()))
 
-            if step > 0 and step % self.eval_interval == 0 and (self.val_loader is not None):
-                val_log_prob = self.val_eval_log_density()
-                val_log_prob = val_log_prob[0].item()  # mean loss for all validation batches
+                loss.backward()
+                optimizer.step()
 
-                if best_val_log_prob is None or val_log_prob > best_val_log_prob:
-                    best_val_log_prob = val_log_prob
+                if scheduler is not None:
+                    scheduler.step()
+
+            self.log_density_list.append(sum(epoch_log_density) / len(epoch_log_density))  # mean loss per epoch
+            self.loss_list.append(sum(epoch_loss) / len(epoch_loss))
+
+            if (epoch + 1) % self.eval_interval == 0 and (self.val_loader is not None):
+                val_loss = self.val_eval_log_density()
+                mean_val_loss = val_loss[0].item()  # mean loss for all validation batches
+                print("mean val loss: ", mean_val_loss)
+
+                if best_val_log_prob is None or mean_val_loss > best_val_log_prob:
+                    best_val_log_prob = mean_val_loss
                     best_model_weights = self.model.state_dict()
                     evals_without_improvement = 0
                 else:
@@ -673,7 +696,7 @@ class NSF(BaseModel):
 
                 # early stopping
                 if evals_without_improvement >= self.early_stopping_patience:
-                    print(f"Early stopping at step {step + 1}.")
+                    print(f"Early stopping at epoch {epoch + 1}.")
 
                     if best_model_weights:
                         print("Loading best model weights so far.")
@@ -682,7 +705,7 @@ class NSF(BaseModel):
                     break
 
         # self.save(best_val="1", **save_kwargs)
-        if clear_mem and self.device in ["cuda", "cuda:0", "cuda:1"]:
+        if clear_mem and "cuda" in str(self.device):
             torch.cuda.empty_cache()
         return best_val_log_prob
 
@@ -691,7 +714,7 @@ class NSF(BaseModel):
         with torch.no_grad():
             total_ld = []
             batch_counter = 0
-            for _batch in self.val_loader:
+            for val_step, _batch in enumerate(self.val_loader):
                 _batch = _batch['image'].to(dtype=torch.float32, device=self.device)
                 log_prob = self.model.log_prob(_batch)
                 total_ld.append(log_prob)
@@ -699,7 +722,9 @@ class NSF(BaseModel):
                 if (num_batches is not None) and batch_counter == num_batches:
                     break
             total_ld = torch.cat(total_ld)
+            self.val_log_density_list.append(torch.mean(total_ld).float().cpu())
             total_ld = nats_to_bits_per_dim(total_ld, c, h, w, d)
+            self.val_loss_list.append(torch.mean(total_ld).float().cpu())
             return total_ld.mean(), 2 * total_ld.std() / total_ld.shape[0]
 
     def eval_log_density(self, input):
@@ -710,16 +735,140 @@ class NSF(BaseModel):
             log_prob = self.model.log_prob(input)
             return log_prob
 
+    def sample(self, n_samples):
+        with torch.no_grad():
+            samples = self.model.sample(n_samples, batch_size=self.batch_size).detach().cpu().numpy()
+
+        return samples
 
 class OptimizedNSF(NSF):
     def __init__(self, _train_loader, _val_loader=None):
         super().__init__(_train_loader, _val_loader, **nsf_params)
 
 
+class EmbeddingNSF(BaseModel):
+    """Flatten Embedding and train NSF on embeddings."""
+    def __init__(
+            self,
+            _train_loader,
+            _val_loader=None,
+            model_path=None,
+
+            embedding_dim=64,
+
+            num_flow_steps=8,
+            levels=3,
+            multi_scale=True,  # what is multiscale ?
+            actnorm=False,
+            eval_interval=10,  # after how many steps evaluate on validation set
+            early_stopping=3,
+            device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+
+            # Optimization
+            epochs = 100,
+            learning_rate=1e-4,
+            cosine_annealing=False,
+            eta_min=0.,
+            num_bins=4,
+            num_steps=None,
+
+            # coupling_transform
+            mask_type = "alternate",
+            coupling_layer_type='rational_quadratic_spline',
+            one_by_one_conv = False,
+            hidden_channels=256,
+            context_features=None,
+            use_resnet=False,
+            num_res_blocks=5,  # If using resnet
+            resnet_activation=torch.nn.functional.relu,
+            resnet_batchnorm=True,
+            dropout_prob=0.,
+
+            spline_parameters: dict = None,
+
+            seed=None
+
+    ):
+        self.embedding_dim = embedding_dim
+
+        # flow params
+        self.num_flow_steps = num_flow_steps
+
+        # coupling params
+        self.mask_type = mask_type
+        assert coupling_layer_type in ["rational_quadratic_spline"]
+        self.num_bins = num_bins
+
+        # resnet params:
+        self.hidden_channels = hidden_channels
+        self.context_features = context_features
+        self.num_res_blocks = num_res_blocks
+        self.resnet_activation = resnet_activation
+        self.dropout_prob = dropout_prob
+        self.resnet_batchnorm = resnet_batchnorm
+
+        print("embedding_shape (should be (batch_size, 64): ",  next(iter(self.train_loader)).shape)
+        super().__init__(self.model, model_path=model_path, base_filename="NSF_latent", device=device, seed=seed)
+
+    def get_shape(self):
+        return next(iter(self.train_loader)).shape
+
+    def create_flow(self):
+        base_distribution = StandardNormal([self.embedding_dim])
+        transform = self.create_transform()
+
+        _flow = Flow(transform, base_distribution)
+
+        if self.flow_checkpoint is not None:
+            _flow.load_state_dict(torch.load(self.flow_checkpoint))
+
+        return _flow
+
+    def create_transform(self):
+        # linear "lu" transform
+        transform_steps = [
+            nflows.transforms.RandomPermutation(self.latent_dim),
+            nflows.transforms.LULinear(self.latent_dim, identity_init=True)
+        ]
+
+        # add spline transforms
+        transform_steps.extend([self._create_transform_step(i) for i in range(self.num_flow_steps)])
+
+        return CompositeTransform(transform_steps)
+
+
+    def _create_transform_step(self, iteration):
+        _transform = _PiecewiseRationalQuadraticCouplingTransform(
+            mask = self.get_mask(iteration),
+            transform_net_create_fn = lambda in_features,
+                                             out_features: ResidualNet(
+                in_features=in_features,
+                out_features=out_features,
+                hidden_features=self.hidden_channels,
+                context_features=self.context_features,
+                num_blocks=self.num_res_blocks,
+                activation=self.resnet_activation,
+                dropout_probability=self.dropout_prob,
+                use_batch_norm=self.resnet_batchnorm
+            ),
+            num_bins=self.num_bins,
+            tails='linear',
+        )
+        return _transform
+
+    def get_mask(self, iteration):
+        if self.mask_type=="alternate":
+            return nflows.utils.create_alternating_binary_mask(self.embedding_dim, even=(iteration % 2==0))
+        elif self.mask_type=="mid_split":
+            return nflows.utils.create_alternating_binary_mask(self.embedding_dim)
+        else:
+            raise NotImplementedError
+
+
 if __name__ == "__main__":
     dataset = DataSet(**data_kwargs)
-    train_loader, val_loader = get_train_val_loader(dataset, split_ratio=.9, **train_loader_kwargs)
+    # train_loader, val_loader = get_train_val_loader(dataset, split_ratio=.9, **train_loader_kwargs)
 
-    flow = NSF(train_loader, val_loader, **nsf_params)
-    print("device: ", flow.device)
-    flow.train()
+    #flow = NSF(train_loader, val_loader, **nsf_params)
+    # print("device: ", flow.device)
+    # flow.train()
