@@ -144,7 +144,7 @@ def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, 
         plt.xlim(1e-3, 1.0)
         plt.ylim(1e-3, 1.0)
 
-    plt.subplots_adjust(left= , bottom=0.5)
+    plt.subplots_adjust(left=0.2, bottom=0.2)
     file_path = f"data/plots/ROC_{label}_{label2}_{label3}_lowfprs{low_fprs}.png"
     plt.grid()
     if save:
