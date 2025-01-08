@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import sklearn
 
 import nibabel as nib
 from monai.data import DataLoader
@@ -131,7 +132,7 @@ class DataSet(DataSet_monai):
         elif self.dtype == torch.uint8 and image.dtype == torch.float32:
             image = float32_to_uint8(image)
         
-        return {"image": image}
+        return image
 
     def get_images(self, range_indices: list):
         assert len(range_indices) == 2, "Provided range indices are not a list of two values"
@@ -258,6 +259,30 @@ class RawDataSet(DataSet):
         return img_paths
 
 
+class DigitsDataSet(DataSet):
+    def __init__(
+        self,
+        transform=None,
+        dtype: np.dtype = np.float16,
+    ):
+        self.transform = transform
+        self.data = self.__load__()
+
+        super().__init__(self.data, dtype)
+
+    def __load__(self):
+        digits = sklearn.datasets.load_digits()
+        return digits.images
+
+    def __getitem__(self, idx):
+        image = np.copy(self.data[idx])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
+
+
 class SyntheticDataSet(DataSet):
     def __init__(self, cached_file, labels=None, dtype=np.float16):
         self.cached_file = cached_file
@@ -283,7 +308,7 @@ class SyntheticDataSet(DataSet):
         if self.labels is not None:
             return {"image": image, "label": self.labels[idx]}
         else:
-            return {"image": image}
+            return image
 
 
 def get_train_val_loader(

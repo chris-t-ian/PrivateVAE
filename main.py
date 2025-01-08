@@ -1,5 +1,10 @@
 
-from PrivateVAE.p_vqvae.experiments import *
+from p_vqvae.experiments import *
+#import torchvision.datasets as datasets
+#import torchvision.transforms as transforms
+
+# Define the location to store the dataset
+dataset_path = "./mnist_data"
 
 import matplotlib
 matplotlib.use('Agg')
@@ -23,10 +28,11 @@ if __name__ == "__main__":
     #plot_learning_curves_nsf()
     #plot_learning_curve_vqvae_and_transformer()
     #plot_learning_curve_vqvae_and_transformer()
-    show_synthetic_images()
-    domias_multiseed(n=4, show_roc=True, show_mia_score_hist=True)
-    domias_overfitting()
-    # next: sample intermediate images during training of NSF
-    # next: get rid of squeeze transform, look if sampled images look better by running:
+    #show_synthetic_images()
+    # mnist_train = datasets.MNIST(root=dataset_path, train=True, transform=transforms.ToTensor(), download=True)
+    #domias_multiseed(n=4, show_roc=True, show_mia_score_hist=True)
+    #domias_overfitting()
+
+    domias_digits(plot_roc=True)
 
 

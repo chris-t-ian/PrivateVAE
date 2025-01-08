@@ -19,18 +19,18 @@ import torch
 from p_vqvae.dataloader import DataSet, get_train_val_loader, load_batches
 from p_vqvae.networks import BaseModel, ResidualNet
 
-device = "cuda:4"
+device = "cuda:0"
 
 data_kwargs = {
-    "root":"data/ATLAS_2",
-    "cache_path":"data/cache",
+    "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
+    "cache_path": '/home/chrsch/P_VQVAE/data/cache/',
     "downsample": 4,
     "normalize": 1,
     "crop": ((8, 9), (12, 13), (0, 9)),
     "padding": ((1, 2), (0, 0), (1, 2)),
 }
 model_params = {
-    "model_path": "model_outputs/mia",
+    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
     "device": device,
     "eval_interval": 10,  # after how many steps evaluate on validation set, before: 20
     "early_stopping": float('inf'),  # after how many evaluation steps stop the training
@@ -49,11 +49,11 @@ _spline_params = {
 }
 optimization = {
     "epochs": 400, #400,
-#    "batch_size": 16, #
+#   "batch_size": 16, #
     "learning_rate": 4e-4,
     "cosine_annealing": True,
     "eta_min": 0.,
-#    "num_steps": 1000,  # change in implementation
+#   "num_steps": 1000,  # change in implementation
     "mask_type": "alternating",
     "one_by_one_conv": True,
 }
@@ -558,7 +558,7 @@ class NSF(BaseModel):
         super().__init__(self.model, model_path=model_path, base_filename="NSF", device=device, seed=seed)
 
     def get_shape(self):
-        return next(iter(self.train_loader))['image'].shape
+        return next(iter(self.train_loader)).shape
 
     def create_flow(self):
         c, h, w, d = self.shape[1:]
@@ -662,7 +662,7 @@ class NSF(BaseModel):
 
                 optimizer.zero_grad()
 
-                batch = batch['image'].to(dtype=torch.float32, device=self.device)  # .to(self.device)
+                batch = batch.to(dtype=torch.float32, device=self.device)  # .to(self.device)
                 assert batch.numel() > 0, "Empty batch encountered!"
 
                 log_density = self.model.log_prob(batch)
@@ -715,7 +715,7 @@ class NSF(BaseModel):
             total_ld = []
             batch_counter = 0
             for val_step, _batch in enumerate(self.val_loader):
-                _batch = _batch['image'].to(dtype=torch.float32, device=self.device)
+                _batch = _batch.to(dtype=torch.float32, device=self.device)
                 log_prob = self.model.log_prob(_batch)
                 total_ld.append(log_prob)
                 batch_counter += 1

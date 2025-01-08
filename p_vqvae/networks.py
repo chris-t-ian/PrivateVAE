@@ -339,7 +339,7 @@ class VQ_VAE(BaseModel):
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
-                images = batch['image'].to(self.device, dtype=self.dtype)
+                images = batch.to(self.device, dtype=self.dtype)
                 self.optimizer.zero_grad(set_to_none=True)
 
                 reconstruction, quantization_loss = self.model(images=images)
@@ -409,7 +409,7 @@ class VQ_VAE(BaseModel):
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
-                images = batch['image'].to(self.device, dtype=torch.float32)
+                images = batch.to(self.device, dtype=torch.float32)
                 reconstruction, quantization_loss = self.model(images=images)
 
                 if val_step == 1:
@@ -433,7 +433,7 @@ class VQ_VAE(BaseModel):
     def create_synthetic_images(self, num_images=4):
         self.model.eval()
 
-        test_scan = next(iter(self.train_loader))['image'].to(self.device).float()
+        test_scan = next(iter(self.train_loader)).to(self.device).float()
 
         latent_shape = self.model.encode(test_scan).shape
         spatial_shape = latent_shape[2:]
@@ -507,16 +507,16 @@ class TransformerDecoder_VQVAE(BaseModel):
         super().__init__(transformer_model, model_path, "transformer_VQVAE", device, device_ids, seed)
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
         self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
-            next(iter(self.train_loader))['image'].to(device=self.vqvae_device, dtype=self.dtype)).shape[2:]
+            next(iter(self.train_loader)).to(device=self.vqvae_device, dtype=self.dtype)).shape[2:]
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
             spatial_dims=3,
             dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
-                next(iter(train_loader))['image'].to(device=self.vqvae_device, dtype=self.dtype)).shape[2:],
+                next(iter(train_loader)).to(device=self.vqvae_device, dtype=self.dtype)).shape[2:],
         )
 
     def _init_model(self):
-        test_scan = next(iter(self.train_loader))['image'].to(self.vqvae_device, dtype=self.dtype)
+        test_scan = next(iter(self.train_loader)).to(self.vqvae_device, dtype=self.dtype)
         spatial_shape = self.vqvae_model.encode_stage_2_inputs(test_scan).shape[2:]
 
         # define maximum sequence length
@@ -547,7 +547,7 @@ class TransformerDecoder_VQVAE(BaseModel):
             progress_bar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), ncols=110)
             progress_bar.set_description(f"Epoch {epoch}")
             for step, batch in progress_bar:
-                images = batch['image'].to(self.device).float()
+                images = batch.to(self.device).float()
 
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -604,7 +604,7 @@ class TransformerDecoder_VQVAE(BaseModel):
         val_loss = 0
         with torch.no_grad():
             for val_step, batch in enumerate(self.val_loader, start=1):
-                images = batch['image'].to(self.device, dtype=self.dtype)
+                images = batch.to(self.device, dtype=self.dtype)
                 logits, quantizations_target, _ = self.inferer(
                     images, self.vqvae_model, self.model, self.ordering, return_latent=True
                 )

@@ -1,4 +1,4 @@
-from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, get_train_loader, get_train_val_loader
+from p_vqvae.dataloader import RawDataSet, SyntheticDataSet, DigitsDataSet, get_train_loader, get_train_val_loader
 from p_vqvae.networks import train_transformer_and_vqvae, MembershipClassifier
 from p_vqvae.neural_spline_flow import OptimizedNSF
 from p_vqvae.utils import subset_to_sha256_key, calculate_AUC
@@ -35,7 +35,45 @@ class ChallengerRawDataSet(RawDataSet):
         if self.transform:
             image = self.transform(image)
 
-        return {"image": image}
+        return image
+
+    def __len__(self):
+        """Return length of challenger dataset instead of the size of the whole data distribution."""
+        return len(self.challenger_ids)
+
+    def sample_challenger_dataset(self, seed):
+        """Take entire (memory mapped) dataset and sample n_train images. Return sampled dataset in random order and the
+        rest of the dataset distribution without the challenger dataset."""
+        random.seed(seed)  # fixed seed for sampling datasets
+        random_challenger_ids = random.sample(range(0, n_atlas), self.n_train)
+        non_challenger_ids = [i for i in range(0, n_atlas) if i not in random_challenger_ids]
+
+        # return distribution[random_challenger_ids], distribution[non_challenger_ids]
+        return random_challenger_ids, non_challenger_ids
+
+
+class ChallengerDigitsDataset(DigitsDataSet):
+    def __init__(self, seed, n_train, **kwargs):
+        """
+
+        :param seed: seed for which to select training subjects
+        :param n_train: number of images to train on
+        :param kwargs: kwargs for training dataset
+        """
+        super().__init__(**kwargs)
+        self.n_train = n_train
+        self.challenger_ids, self.non_challenger_ids = self.sample_challenger_dataset(seed)
+
+    def __getitem__(self, idx):
+        """Overwriting __get_item__ method, so that the idx refers to index within the challenger dataset. Maps input
+        "idx" to items in the challenger dataset."""
+        i = self.challenger_ids[idx]  # mapping of idx to item in challenger dataset
+        image = np.copy(self.data[i])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
 
     def __len__(self):
         """Return length of challenger dataset instead of the size of the whole data distribution."""
@@ -84,16 +122,16 @@ class Challenger:
         self.training_transformer_kwargs = transformer_kwargs
 
         # sample challenger dataset using fixed seed
-        challenger_ds = ChallengerRawDataSet(self.data_seed, n_c, **raw_data_kwargs)
+        challenger_ds = self.get_challenger_raw_dataset(n_c, **raw_data_kwargs)
         challenger_train_loader = get_train_loader(challenger_ds, **vqvae_train_loader_kwargs)
 
         self.challenger_ids = challenger_ds.challenger_ids
         self.non_challenger_ids = challenger_ds.non_challenger_ids
         self.target_ids, self.target_memberships = self.sample_n_random_target_ids(n_targets)
 
-        non_challenger_ds = AdversaryRawDataSet(self.non_challenger_ids[:int(0.2 * len(self.non_challenger_ids))],
-                                                **raw_data_kwargs)
-        challenger_val_loader = get_train_loader(non_challenger_ds, **vqvae_train_loader_kwargs)
+        # validation set
+        challenger_val_ds = self.get_challenger_raw_dataset_val(**raw_data_kwargs)
+        challenger_val_loader = get_train_loader(challenger_val_ds, **vqvae_train_loader_kwargs)
 
         # train challenger model, train VQVAE and transformer decoder at once using a fixed seed
         self.t_vqvae = train_transformer_and_vqvae(challenger_train_loader,
@@ -123,7 +161,7 @@ class Challenger:
             challenger_syn_imgs = self.t_vqvae.create_synthetic_images(self.m_c)
             np.save(syn_data_file, challenger_syn_imgs)
 
-        self.challenger_syn_dataset = SyntheticDataSet(syn_data_file)
+        self.challenger_syn_dataset = self.get_challenger_syn_dataset(syn_data_file)
 
         # self.n_c = challenger_ds.__len__()  # size of challenger dataset
 
@@ -160,6 +198,33 @@ class Challenger:
 
         return target_ids, target_memberships
 
+    def get_challenger_raw_dataset(self, n_c, **kwargs):
+        return ChallengerRawDataSet(self.data_seed, n_c, **kwargs)
+
+    def get_challenger_raw_dataset_val(self, **kwargs):
+        # why is here int(0.2 * len(self.non_challenger_ids))]?
+        # because it's a validation set
+        return AdversaryRawDataSet(self.non_challenger_ids[:int(0.2 * len(self.non_challenger_ids))], **kwargs)
+
+    def get_challenger_syn_dataset(self, syn_file):
+        return SyntheticDataSet(syn_file)
+
+
+class ChallengerDigits(Challenger):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def get_challenger_raw_dataset(self, n_c, **kwargs):
+        return ChallengerDigitsDataset(self.data_seed, n_c, **kwargs)
+
+    def get_challenger_raw_dataset_val(self, **kwargs):
+        # why is here int(0.2 * len(self.non_challenger_ids))]?
+        # because it's the validation set and challenger_ids all need to be in the training set
+        return AdversaryDigitsDataSet(self.non_challenger_ids[:int(0.2 * len(self.non_challenger_ids))], **kwargs)
+
+    def get_challenger_syn_dataset(self, syn_file):
+        return SyntheticDataSet(syn_file)
+
 
 class AdversaryRawDataSet(RawDataSet):
     def __init__(self, adversary_ids, **kwargs):
@@ -175,15 +240,42 @@ class AdversaryRawDataSet(RawDataSet):
         if self.transform:
             image = self.transform(image)
 
-        return {"image": image}
+        return image
 
     def __len__(self):
         """Return length of challenger dataset instead of the size of the whole data distribution."""
         return len(self.adversary_ids)
 
     def getitem_by_id(self, id):
+        """Mapping of id to the whole dataset."""
         image = np.copy(self.data[id])
-        return {"image": image}
+        return image
+
+
+class AdversaryDigitsDataSet(DigitsDataSet):
+    def __init__(self, adversary_ids, **kwargs):
+        super().__init__(**kwargs)
+        self.adversary_ids = adversary_ids
+
+    def __getitem__(self, idx):
+        """Overwrite __get_item__ method, so that the idx refers to index within the challenger dataset. Maps input
+        "idx" to items in the challenger dataset."""
+        i = self.adversary_ids[idx]  # mapping of idx to item in challenger dataset
+        image = np.copy(self.data[i])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
+
+    def __len__(self):
+        """Return length of challenger dataset instead of the size of the whole data distribution."""
+        return len(self.adversary_ids)
+
+    def getitem_by_id(self, id):
+        """Mapping of id to the whole dataset."""
+        image = np.copy(self.data[id])
+        return image
 
 
 class AdversaryDOMIAS:
@@ -211,9 +303,9 @@ class AdversaryDOMIAS:
             (f"adversary_ids and non_adversary_ids overlap with "
              f"{len(set(self.adversary_ids) & set(self.non_adversary_ids))} elements")
 
-        self.auxiliary_ds = AdversaryRawDataSet(self.adversary_ids, **data_kwargs)
-        self.auxiliary_ds_val = AdversaryRawDataSet(self.non_adversary_ids[:int(0.9 * len(self.non_adversary_ids))],
-                                                    **data_kwargs)
+        self.auxiliary_ds = self.get_adversary_raw_dataset(**data_kwargs)
+        self.auxiliary_ds_val = self.get_adversary_raw_dataset_val(**data_kwargs)
+
         # self.adversary_train_loader = get_train_loader(self.adversary_ds, **nsf_train_loader_kwargs)
         self.adversary_train_loader = get_train_loader(self.auxiliary_ds, **nsf_train_loader_kwargs)
         self.adversary_val_loader = get_train_loader(self.auxiliary_ds_val, **nsf_train_loader_kwargs)
@@ -271,7 +363,7 @@ class AdversaryDOMIAS:
         # for every target x get p_S(x) from the nsf-density estimator
         log_p_s = []
         for target_id in self.target_ids:
-            target = self.auxiliary_ds.getitem_by_id(target_id)['image']
+            target = self.auxiliary_ds.getitem_by_id(target_id)
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_syn.device)
             # print("log_p_s val:", nsf_syn.eval_log_density(target).item())
@@ -290,7 +382,7 @@ class AdversaryDOMIAS:
 
         log_p_r = []
         for target_id in self.target_ids:
-            target = self.auxiliary_ds.getitem_by_id(target_id)['image']
+            target = self.auxiliary_ds.getitem_by_id(target_id)
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_raw.device)
             log_p_r.append(nsf_raw.eval_log_density(target).item())
@@ -369,7 +461,6 @@ class AdversaryDOMIAS:
         print("fprs: ", fprs)
         return tprs, fprs
 
-
     def select_outliers(self, percentile=0.2):
         """Select outliers of the dataset by selecting targets with low densities."""
         target_ids = np.array(self.target_ids)
@@ -393,6 +484,20 @@ class AdversaryDOMIAS:
 
     def get_true_memberships(self):
         return self.challenger.target_memberships
+
+    def get_adversary_raw_dataset(self, **kwargs):
+        return AdversaryRawDataSet(self.adversary_ids, **kwargs)
+
+    def get_adversary_raw_dataset_val(self, **kwargs):
+        return AdversaryRawDataSet(self.non_adversary_ids[:int(0.2 * len(self.non_adversary_ids))], **kwargs)
+
+
+class AdversaryDOMIASDigits(AdversaryDOMIAS):
+    def get_adversary_raw_dataset(self, **kwargs):
+        return AdversaryDigitsDataSet(self.adversary_ids, **kwargs)
+
+    def get_adversary_raw_dataset_val(self, **kwargs):
+        return AdversaryDigitsDataSet(self.non_adversary_ids[:int(0.2 * len(self.non_adversary_ids))], **kwargs)
 
 
 class AdversaryLOGAN(AdversaryDOMIAS):
@@ -487,7 +592,7 @@ class AdversaryZCalibratedDOMIAS2(AdversaryZCalibratedDOMIAS):
         # for every target x get p_S(x) from the nsf-density estimator
         log_p_s = []
         for target_id in self.target_ids:
-            target = self.auxiliary_ds.getitem_by_id(target_id)['image']
+            target = self.auxiliary_ds.getitem_by_id(target_id)
             target = np.expand_dims(target, axis=0)
             target = torch.from_numpy(target).to(device=nsf_syn.device)
             # print("log_p_s val:", nsf_syn.eval_log_density(target).item())
@@ -814,7 +919,7 @@ class AdversaryLiRANSF(AdversaryLiRA):
         log_p_s = []
         for batch in loader:
             # print("img.shape: ", img.shape)
-            img = batch["image"]
+            img = batch
             log_p_s.append(model.eval_log_density(img).cpu())
         return np.array(log_p_s)
 

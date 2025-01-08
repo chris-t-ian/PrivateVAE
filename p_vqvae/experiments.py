@@ -6,7 +6,8 @@ import os
 import pandas as pd
 from datetime import datetime
 from p_vqvae.mia import Challenger, AdversaryDOMIAS, AdversaryZCalibratedDOMIAS, AdversaryZCalibratedDOMIAS2, \
-    AdversaryLiRANSF, AdversaryLiRAClassifier, AdversaryLOGAN, MultiSeedAdversaryDOMIAS
+    AdversaryLiRANSF, AdversaryLiRAClassifier, AdversaryLOGAN, MultiSeedAdversaryDOMIAS, AdversaryDOMIASDigits, \
+    ChallengerDigits
 from p_vqvae.visualise import show_roc_curve, plot_generated_images, plot_reconstructions, show_roc_curve_std, \
                                show_auc_tpr_plot
 from p_vqvae.networks import train_transformer_and_vqvae
@@ -19,7 +20,7 @@ TEST_MODE = True  # turn off for real attack
 
 include_targets_in_reference_dataset = None  # either True, False or None (=included at random)
 
-device = "cuda:4"
+device = "cuda:0"
 mpl.rcParams['axes.labelsize'] = 17
 plt.xticks(fontsize=15)
 plt.yticks(fontsize=15)
@@ -33,9 +34,9 @@ if TEST_MODE:
     padding = ((1, 2), (0, 0), (1, 2))
     # downsample = 1
     # padding = ((2, 2), (0, 0), (2, 2))
-    n_targets = 955
+    n_targets = 1700
     n_members = 200
-    m_syn_images = n_targets // 2
+    m_syn_images = 1000
 
 else:
     downsample = 1
@@ -54,8 +55,8 @@ adversary_kwargs = {
     "outlier_percentile": None,
 }
 raw_data_kwargs = {
-    "root":"data/ATLAS_2",
-    "cache_path":"data/cache",
+    "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
+    "cache_path": '/home/chrsch/P_VQVAE/data/cache/',
     "downsample": downsample,
     "normalize": 1,
     "crop": ((8, 9), (12, 13), (0, 9)),
@@ -67,7 +68,7 @@ vqvae_train_loader_kwargs = {
 }
 nsf_train_loader_kwargs = {
     "batch_size": 4,  #
-    "augment_flag": True,
+    "augment_flag": False,
     "num_workers": 1
 }
 shadow_model_train_loader_kwargs = {
@@ -92,7 +93,7 @@ vqvae_kwargs = {
     "num_res_channels": (384, 512),  #
     "downsample_parameters": ((2, 4, 1, 1), (2, 4, 1, 1)),
     "upsample_parameters": ((2, 4, 1, 1, 0), (2, 4, 1, 1, 0)),
-    "model_path": "model_outputs/mia",
+    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira"
 }
 transformer_kwargs = {
     "n_epochs": 200,
@@ -104,21 +105,22 @@ transformer_kwargs = {
     "attn_layers_dim": 96,  #
     "attn_layers_depth": 12,  #
     "attn_layers_heads": 12,  #
-    "model_path": "model_outputs/mia"
+    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira"
 }
 membership_classifier_kwargs = {
-    "model_path": "model_outputs/mia",
+    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira"
 }
 
 # always use the same challenger:
-challenger_half = Challenger(
-    **challenger_kwargs,
-    raw_data_kwargs=raw_data_kwargs,
-    vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
-    vqvae_kwargs=vqvae_kwargs,
-    transformer_kwargs=transformer_kwargs,
-    seed=0,
-)
+challenger_half = None  # Challenger(
+#    **challenger_kwargs,
+#    raw_data_kwargs=raw_data_kwargs,
+#    vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
+#    vqvae_kwargs=vqvae_kwargs,
+#    transformer_kwargs=transformer_kwargs,
+#    seed=0,
+#)
+
 
 def log(name, content: dict, path="data/logs"):
     file = os.path.join(path, name + now.strftime("%d%m%Y_%H%M%S") + ".csv")
@@ -288,6 +290,39 @@ def domias(adversary_knowledge=1.0, plot_roc=False, challenger=challenger_half, 
         show_roc_curve(tprs, fprs, f"DOMIAS knowledge: {adversary_knowledge}", low_fprs=True)
     return tprs, fprs, _adversary.log_p_s, _adversary.log_p_r, _adversary.true_memberships
 
+
+def domias_digits(adversary_knowledge=1.0, plot_roc=True, outlier_percentile=None):
+    challenger = Challenger(
+        **challenger_kwargs,
+        raw_data_kwargs=raw_data_kwargs,
+        vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
+        vqvae_kwargs=vqvae_kwargs,
+        transformer_kwargs=transformer_kwargs,
+        seed=0,
+    )
+    _adversary = AdversaryDOMIASDigits(challenger, raw_data_kwargs, nsf_train_loader_kwargs, adversary_knowledge,
+                                 outlier_percentile)
+    tprs, fprs = _adversary.tprs, _adversary.fprs
+
+    if plot_roc:
+        show_roc_curve(tprs, fprs, f"DOMIAS knowledge: {adversary_knowledge}")
+        show_roc_curve(tprs, fprs, f"DOMIAS knowledge: {adversary_knowledge}", low_fprs=True)
+    return tprs, fprs, _adversary.log_p_s, _adversary.log_p_r, _adversary.true_memberships
+
+
+def show_synthetic_images():
+    challenger = Challenger(
+        **challenger_kwargs,
+        raw_data_kwargs=raw_data_kwargs,
+        vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
+        vqvae_kwargs=vqvae_kwargs,
+        transformer_kwargs=transformer_kwargs,
+        seed=0,
+    )
+    """Plot sampled images of the VQVAE + transformer as sanity check."""
+    t_vqvae = challenger_half.t_vqvae
+    syn = t_vqvae.create_synthetic_images(2)
+    plot_generated_images(syn, 1, "data/plots/syn_image.png")
 
 def domias_multiseed(n=n_seeds, _challenger_kwargs: dict = None, _adversary_kwargs: dict = None, _vqvae_kwargs: dict =None,
                      _transformer_kwargs: dict = None, show_roc=False, show_mia_score_hist=False):
