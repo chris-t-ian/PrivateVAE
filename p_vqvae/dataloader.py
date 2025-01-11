@@ -154,7 +154,7 @@ class DataSet(DataSet_monai):
         NotImplementedError("Loading of data is not implemented.")
 
 
-class RawDataSet(DataSet):
+class Atlas3dDataSet(DataSet):
     def __init__(
         self,
         mode: str = "full",
