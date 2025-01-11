@@ -264,6 +264,13 @@ class DigitsDataSet(DataSet):
         self,
         transform=None,
         dtype: np.dtype = np.float16,
+        mode: str = "full",
+        root: str = os.getcwd(),
+        cache_path: str = None,
+        downsample: int = 1,
+        normalize: int = 1,
+        crop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
+        padding: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] = None,
     ):
         self.transform = transform
         self.data = self.__load__()
@@ -272,7 +279,8 @@ class DigitsDataSet(DataSet):
 
     def __load__(self):
         digits = sklearn.datasets.load_digits()
-        return digits.images
+
+        return np.expand_dims(digits.images, axis=1)
 
     def __getitem__(self, idx):
         image = np.copy(self.data[idx])
