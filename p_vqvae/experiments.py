@@ -19,7 +19,7 @@ TEST_MODE = True  # turn off for real attack
 
 include_targets_in_reference_dataset = None  # either True, False or None (=included at random)
 
-device = "cuda:1"
+device = "cuda:4"
 mpl.rcParams['axes.labelsize'] = 17
 plt.xticks(fontsize=15)
 plt.yticks(fontsize=15)
@@ -35,7 +35,7 @@ challenger_kwargs_mri = {
     "n_targets": n_atlas,
 }
 challenger_kwargs_digits = {
-    "n_c": 400, # n_digits // 2,
+    "n_c": 200, # n_digits // 2,
     "m_c": 1000,
     "n_targets": n_digits,
 }
@@ -58,7 +58,7 @@ vqvae_train_loader_kwargs = {
 }
 nsf_train_loader_kwargs = {
     "batch_size": 4,  #
-    "augment_flag": True,
+    "augment_flag": False,
     "num_workers": 1
 }
 shadow_model_train_loader_kwargs = {
@@ -136,7 +136,7 @@ nsf_kwargs_digits["cosine_annealing"] = False
 nsf_kwargs_digits["learning_rate"] = 2e-4
 
 nsf_train_loader_kwargs_digits = nsf_train_loader_kwargs.copy()
-nsf_train_loader_kwargs_digits["batch_size"] = 32
+nsf_train_loader_kwargs_digits["batch_size"] = 4
 
 membership_classifier_kwargs = {
     "model_path": "model_outputs/mia"
@@ -351,7 +351,7 @@ def domias_digits(adversary_knowledge=1.0, plot_roc=True, outlier_percentile=Non
 
 
 def digits_show_synthetic_images():
-    challenger = ChallengerDigits(
+    challenger = Challenger(
         **challenger_kwargs_digits,
         raw_data_kwargs=raw_data_kwargs,
         vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
@@ -395,7 +395,7 @@ def domias_multiseed(n=n_seeds, _challenger_kwargs: dict = None, _adversary_kwar
             _adversary = AdversaryDOMIAS(_challenger, raw_data_kwargs, nsf_train_loader_kwargs, **_adversary_kwargs,
                                          nsf_kwargs = nsf_kwargs_mri)
         elif data_type == "digits":
-            _challenger = ChallengerDigits(
+            _challenger = Challenger(
                 **_challenger_kwargs,
                 raw_data_kwargs=raw_data_kwargs,
                 vqvae_train_loader_kwargs=vqvae_train_loader_kwargs,
