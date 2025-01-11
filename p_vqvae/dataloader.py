@@ -4,6 +4,7 @@ import torch
 import sklearn
 
 import nibabel as nib
+from p_vqvae.utils import get3d_middle_slices, check_and_remove_channel_dimension
 from monai.data import DataLoader
 from monai.data import Dataset as DataSet_monai
 from monai.transforms import Compose, RandAffine, RandShiftIntensity, RandGaussianNoise, ThresholdIntensity, ToTensor
@@ -257,6 +258,54 @@ class Atlas3dDataSet(DataSet):
                 break
 
         return img_paths
+
+
+class Atlas2dDataSet(Atlas3dDataSet):
+    def __init__(
+            self,
+            downsample_2d: int = 1,
+            slice_type: str = "axial",
+            **kwargs
+    ):
+        self.downsample_2d = downsample_2d
+        self.slice_type = slice_type
+        super().__init__(**kwargs)
+
+    def __load__(self):
+        cached_file_2d = os.path.join(self.cache_path, 'ATLAS_2' + self.prefix + f'_2D_{self.slice_type}.npy')
+
+        if os.path.isfile(cached_file_2d) and self.cache_path:  # if file exists and cache path provided, load npy file
+            data_2d = np.load(cached_file_2d, mmap_mode='r')
+        else:
+            cached_file_3d = os.path.join(self.cache_path, 'ATLAS_2' + self.prefix + '.npy')
+            if os.path.isfile(cached_file_3d) and self.cache_path:  # if file exists and cache path provided, load npy file
+                data_3d = np.load(cached_file_3d, mmap_mode='r')
+            else:
+                data_3d = super().__load__()
+
+            data_3d = check_and_remove_channel_dimension(data_3d, dim=3)
+            data_2d = []
+            #if self.slice_type == "axial":
+            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[1], data_3d.shape[2]), dtype=data_3d.dtype)
+            #elif self.slice_type == "coronal":
+            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[1], data_3d.shape[3]), dtype=data_3d.dtype)
+            #elif self.slice_type == "sagittal":
+            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[2], data_3d.shape[3]), dtype=data_3d.dtype)
+            #elif self
+
+            # for every image in data_3d: load slice
+            for idx in range(data_3d.shape[0]):
+                image_3d = np.copy(data_3d[idx])
+                image_2d = get3d_middle_slices(image_3d, output="axial")
+                data_2d.append(image_2d)
+
+            data_2d = np.concatenate(np.array(data_2d), axis=0)
+
+            if self.cache_path:
+                print(f"Storing {self.slice_type} slices as {cached_file_2d}")
+                np.save(cached_file_2d, data_2d)
+
+        return data_2d
 
 
 class DigitsDataSet(DataSet):
