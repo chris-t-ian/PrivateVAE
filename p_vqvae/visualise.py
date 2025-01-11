@@ -8,10 +8,13 @@ from p_vqvae.utils import calculate_AUC
 plt.rcParams['figure.figsize'] = [5, 3.75]
 
 
-def check_and_remove_channel_dimension(x):
-    if len(x.shape) == 5:
+def check_and_remove_channel_dimension(x, dim=3):
+    if dim == 3 and len(x.shape) == 5:
         assert x.shape[1] == 1, f"input file has {x.shape[1]} channels"
         return x[:, 0, :, :, :]
+    if dim == 2 and len(x.shape) == 4:
+        assert x.shape[1] == 1, f"input file has {x.shape[1]} channels"
+        return x[:, 0, :, :]
     else:
         return x
 
@@ -26,12 +29,11 @@ def get3d_middle_slices(x):
     return np.concatenate([image_0, image_1], axis=0)
 
 
-def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.png"):
+def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.png", dim=3):
 
-    img = check_and_remove_channel_dimension(img)
-
+    img = check_and_remove_channel_dimension(img, dim)
     if n == 1:
-        image = get3d_middle_slices(img[0])
+        image = get3d_middle_slices(img[0]) if dim == 3 else img[1]
         plt.imshow(image, cmap="gray")
 
     else:
