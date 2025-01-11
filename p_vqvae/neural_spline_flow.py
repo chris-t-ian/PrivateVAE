@@ -14,26 +14,29 @@ from nflows.transforms import PiecewiseRationalQuadraticCouplingTransform as \
     _PiecewiseRationalQuadraticCouplingTransform
 from nflows.transforms.lu import LULinear
 from nflows.transforms.permutations import RandomPermutation
+from nflows.utils import torchutils
+
 import torch
 
 from p_vqvae.dataloader import DataSet, get_train_val_loader, load_batches
 from p_vqvae.networks import BaseModel, ResidualNet
 
-device = "cuda:0"
+device = "cuda:1"
 
+# optimized for MRI data
 data_kwargs = {
-    "root": "/home/chrsch/P_VQVAE/data/ATLAS_2",
-    "cache_path": '/home/chrsch/P_VQVAE/data/cache/',
+    "root": "data/ATLAS_2",
+    "cache_path": 'data/cache/',
     "downsample": 4,
     "normalize": 1,
     "crop": ((8, 9), (12, 13), (0, 9)),
     "padding": ((1, 2), (0, 0), (1, 2)),
 }
 model_params = {
-    "model_path": "/home/chrsch/P_VQVAE/model_outputs/lira",
+    "model_path": "model_outputs/mia",
     "device": device,
-    "eval_interval": 10,  # after how many steps evaluate on validation set, before: 20
-    "early_stopping": float('inf'),  # after how many evaluation steps stop the training
+    "eval_interval": 2,  # after how many steps evaluate on validation set, before: 20
+    "early_stopping": 5, #float('inf'),  # after how many evaluation steps stop the training
     "steps_per_level": 10,
     "levels": 2,  # increase for non-downsampled dataset
     "multi_scale": True,
@@ -51,7 +54,7 @@ optimization = {
     "epochs": 400, #400,
 #   "batch_size": 16, #
     "learning_rate": 4e-4,
-    "cosine_annealing": True,
+    "cosine_annealing": False,
     "eta_min": 0.,
 #   "num_steps": 1000,  # change in implementation
     "mask_type": "alternating",
@@ -66,7 +69,7 @@ coupling_transform = {
     "dropout_prob": 0.,
 }
 
-nsf_params = {**model_params, **optimization, **coupling_transform, "spline_parameters": _spline_params}
+optimized_nsf_params = {**model_params, **optimization, **coupling_transform, "spline_parameters": _spline_params}
 
 
 class Conv3dSameSize(torch.nn.Conv3d):
@@ -77,8 +80,15 @@ class Conv3dSameSize(torch.nn.Conv3d):
         # print("padding: ", same_padding)  # debugging print
         super().__init__(in_channels, out_channels, kernel_size, padding=same_padding)
 
+class Conv2dSameSize(torch.nn.Conv2d):
+    """Makes sure that the output has the same shape as the input. Adaptation of Conv2dSameSize of
+    nsf.experiments.autils for 3d data."""
+    def __init__(self, in_channels, out_channels, kernel_size):
+        same_padding = kernel_size // 2  # Padding that would keep the spatial dims the same
+        # print("padding: ", same_padding)  # debugging print
+        super().__init__(in_channels, out_channels, kernel_size, padding=same_padding)
 
-class ConvNet(torch.nn.Module):
+class ConvNet3D(torch.nn.Module):
     """Encoder to reduce dimensions of MRI data."""
     def __init__(self, in_channels, out_channels, hidden_channels):
         super().__init__()
@@ -89,6 +99,22 @@ class ConvNet(torch.nn.Module):
             Conv3dSameSize(hidden_channels, hidden_channels, kernel_size=1),
             torch.nn.ReLU(),
             Conv3dSameSize(hidden_channels, out_channels, kernel_size=3),
+        )
+
+    def forward(self, x, context=None):
+        return self.net.forward(x)
+
+class ConvNet2D(torch.nn.Module):
+    """Encoder to reduce dimensions of MRI data."""
+    def __init__(self, in_channels, out_channels, hidden_channels):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.net = torch.nn.Sequential(
+            Conv2dSameSize(in_channels, hidden_channels, kernel_size=3),
+            torch.nn.ReLU(),
+            Conv2dSameSize(hidden_channels, hidden_channels, kernel_size=1),
+            torch.nn.ReLU(),
+            Conv2dSameSize(hidden_channels, out_channels, kernel_size=3),
         )
 
     def forward(self, x, context=None):
@@ -109,15 +135,24 @@ class _CompositeTransform(CompositeTransform):
 
 
 def create_transform_step(num_channels, hidden_channels, actnorm, spline_params, coupling_layer_type,
-                          use_resnet, dropout_prob, num_bins, one_b_one_conv=True, mask_type="mid_split", iteration=0):
+                          use_resnet, dropout_prob, num_bins, one_b_one_conv=True, mask_type="mid_split", iteration=0,
+                          spatial_dim=3):
     if use_resnet:
         raise NotImplementedError
     else:
         if dropout_prob != 0.:
             raise ValueError()
 
-        def create_convnet(in_channels, out_channels):
-            return ConvNet(in_channels, out_channels, hidden_channels=hidden_channels)
+        if spatial_dim == 3:
+            def create_convnet(in_channels, out_channels):
+                return ConvNet3D(in_channels, out_channels, hidden_channels=hidden_channels)
+
+        elif spatial_dim == 2:
+            def create_convnet(in_channels, out_channels):
+                return ConvNet2D(in_channels, out_channels, hidden_channels=hidden_channels)
+
+        else:
+            raise NotImplementedError
 
     if mask_type == "mid_split":
         mask = nflows.utils.create_mid_split_binary_mask(num_channels)
@@ -210,6 +245,65 @@ class SqueezeTransform(Transform):
         inputs = inputs.view(batch_size, c // self.factor ** 3, self.factor, self.factor, self.factor, h, w, d)
         inputs = inputs.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
         inputs = inputs.view(batch_size, c // self.factor ** 3, h * self.factor, w * self.factor, d * self.factor)
+        print("inputs shape after inverse squeezing: ", inputs.shape)
+        return inputs, torch.zeros(batch_size)
+
+
+class SqueezeTransform2D(Transform):
+    """A transformation defined for 3D image data that trades spatial dimensions for channel
+    dimensions, i.e. "squeezes" the inputs along the channel dimensions.
+
+    Implementation adapted from https://github.com/pclucas14/pytorch-glow,
+    https://github.com/chaiyujin/glow-pytorch and https://github.com/bayesiains/nsf
+
+
+    References:
+    > L. Dinh et al., Density estimation using Real NVP, ICLR 2017.
+    > C. Durkan et al., Neural Spline Flows, NeurIPS 2019.
+    """
+    def __init__(self, factor=2):
+        super(SqueezeTransform2D, self).__init__()
+
+        if not type(factor) == int or factor <= 1:
+            raise ValueError('Factor must be an integer > 1.')
+
+        self.factor = factor
+
+    def get_output_shape(self, c, h, w):
+        return (c * self.factor * self.factor,
+                h // self.factor,
+                w // self.factor)
+
+    def forward(self, inputs, context=None):
+        if inputs.dim() != 4:
+            raise ValueError('Expecting inputs with 4 dimensions')
+
+        batch_size, c, h, w = inputs.size()
+
+        if h % self.factor != 0 or w % self.factor != 0:
+            raise ValueError('Input image size not compatible with the factor.')
+
+        inputs = inputs.view(batch_size, c, h // self.factor, self.factor, w // self.factor,
+                             self.factor)
+        inputs = inputs.permute(0, 1, 3, 5, 2, 4).contiguous()
+        inputs = inputs.view(batch_size, c * self.factor * self.factor, h // self.factor,
+                             w // self.factor)
+        # print("inputs shape after squeezing: ", inputs.shape)
+        return inputs, torch.zeros(batch_size)
+
+    def inverse(self, inputs, context=None):
+        if inputs.dim() != 4:
+            raise ValueError('Expecting inputs with 5 dimensions')
+
+        batch_size, c, h, w = inputs.size()
+
+        if c % (self.factor ** 2) != 0:
+            raise ValueError(f'Invalid number of channel dimensions: {c}. '
+                             f'It must be divisible by {self.factor ** 2}.')
+
+        inputs = inputs.view(batch_size, c // self.factor ** 2, self.factor, self.factor, self.factor, h, w)
+        inputs = inputs.permute(0, 1, 5, 2, 3, 4).contiguous()
+        inputs = inputs.view(batch_size, c // self.factor ** 2, h * self.factor, w * self.factor)
         print("inputs shape after inverse squeezing: ", inputs.shape)
         return inputs, torch.zeros(batch_size)
 
@@ -349,31 +443,39 @@ class OneByOneConvolution(LULinear):
         self.permutation = RandomPermutation(num_channels, dim=1)
 
     def _lu_forward_inverse(self, inputs, inverse=False):
-        from nflows.utils import torchutils
-        b, c, h, w, d = inputs.shape
-        inputs = inputs.permute(0, 2, 3, 4, 1).reshape(b * h * w * d, c)
+        #print("len input shape: ", len(inputs.shape))
+        if len(inputs.shape) == 5:
+            b, c, h, w, d = inputs.shape
+            inputs = inputs.permute(0, 2, 3, 4, 1).reshape(b * h * w * d, c)
+        else:
+            b, c, h, w = inputs.shape
+            inputs = inputs.permute(0, 2, 3, 1).reshape(b * h * w, c)
 
         if inverse:
             outputs, logabsdet = super().inverse(inputs)
         else:
             outputs, logabsdet = super().forward(inputs)
 
-        outputs = outputs.reshape(b, h, w, d, c).permute(0, 4, 1, 2, 3)
-        logabsdet = logabsdet.reshape(b, h, w, d)
+        if len(inputs.shape) == 5:
+            outputs = outputs.reshape(b, h, w, d, c).permute(0, 4, 1, 2, 3)
+            logabsdet = logabsdet.reshape(b, h, w, d)
+        else:
+            outputs = outputs.reshape(b, h, w, c).permute(0, 3, 1, 2)
+            logabsdet = logabsdet.reshape(b, h, w)
 
         return outputs, torchutils.sum_except_batch(logabsdet)
 
     def forward(self, inputs, context=None):
-        if inputs.dim() != 5:
-            raise ValueError("Inputs must be a 5D tensor.")
+        if inputs.dim() not in [4, 5]:
+            raise ValueError("Inputs must be a 4D or 5D tensor.")
 
         inputs, _ = self.permutation(inputs)
 
         return self._lu_forward_inverse(inputs, inverse=False)
 
     def inverse(self, inputs, context=None):
-        if inputs.dim() != 5:
-            raise ValueError("Inputs must be a 5D tensor.")
+        if inputs.dim() not in [4, 5]:
+            raise ValueError("Inputs must be a 4D or 5D tensor.")
 
         outputs, logabsdet = self._lu_forward_inverse(inputs, inverse=True)
 
@@ -472,9 +574,15 @@ class PiecewiseRationalQuadraticCouplingTransform(_PiecewiseRationalQuadraticCou
         return outputs, logabsdet
 
 
-def nats_to_bits_per_dim(nats, _c, _h, _w, _d):
-    return nats / (math.log(2) * _c * _h * _w * _d)
-
+def nats_to_bits_per_dim(nats, batch_shape):
+    if len(batch_shape) == 4:
+        _c, _h, _w, _d = batch_shape
+        return nats / (math.log(2) * _c * _h * _w * _d)
+    elif len(batch_shape) == 3:
+        _c, _h, _w = batch_shape
+        return nats / (math.log(2) * _c * _h * _w)
+    else:
+        raise NotImplementedError
 
 class NSF(BaseModel):
     def __init__(
@@ -516,6 +624,9 @@ class NSF(BaseModel):
         self.train_loader = _train_loader
         self.val_loader = _val_loader
         self.shape = self.get_shape()
+        print("self.shape: ", self.shape)
+        self.spatial_dim = len(self.shape) - 2
+        assert self.spatial_dim in [2, 3], f"This NSF only accepts 2 or 3 spatial dimensions but got {self.spatial_dim}"
 
         # model params
         self.steps_per_level = steps_per_level
@@ -561,9 +672,14 @@ class NSF(BaseModel):
         return next(iter(self.train_loader)).shape
 
     def create_flow(self):
-        c, h, w, d = self.shape[1:]
-        distribution = StandardNormal((c * h * w * d,))
-        transform = self.create_transform(c, h, w, d)
+        if self.spatial_dim == 3:
+            c, h, w, d = self.shape[1:]
+            distribution = StandardNormal((c * h * w * d,))
+            transform = self.create_transform(c, h, w, d)
+        else:
+            c, h, w = self.shape[1:]
+            distribution = StandardNormal((c * h * w,))
+            transform = self.create_transform_2D(c, h, w)
 
         _flow = Flow(transform, distribution)
 
@@ -585,7 +701,7 @@ class NSF(BaseModel):
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
                                                         self.coupling_layer_type, self.use_resnet, self.dropout_prob,
-                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step)
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step, 3)
                                   for step in range(self.steps_per_level)]
 
                 transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
@@ -606,7 +722,7 @@ class NSF(BaseModel):
 
                 transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
                                                         self.coupling_layer_type, self.use_resnet, self.dropout_prob,
-                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step)
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step, 3)
                                   for step in range(self.steps_per_level)]
 
                 transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
@@ -624,10 +740,61 @@ class NSF(BaseModel):
         # Inputs to the model in [0, 2 ** num_bits]
         return mct
 
+    def create_transform_2D(self, c, h, w):
+        if not isinstance(self.hidden_channels, list):
+            self.hidden_channels = [self.hidden_channels] * self.levels
+
+        if self.multi_scale:
+            mct = MultiscaleCompositeTransform(num_transforms=self.levels)
+            for level, level_hidden_channels in zip(range(self.levels), self.hidden_channels):
+                if self.squeeze_factor > 1:
+                    squeeze_transform = SqueezeTransform2D()
+                    c, h, w = squeeze_transform.get_output_shape(c, h, w)
+
+                transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
+                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob,
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step, 2)
+                                  for step in range(self.steps_per_level)]
+
+                transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
+                transform_pipeline.extend(transform_step)
+                transform_pipeline.append(OneByOneConvolution(c))
+                transform_level = _CompositeTransform(transform_pipeline)
+
+                new_shape = mct.add_transform(transform_level, (c, h, w))
+                if new_shape:  # If not last layer
+                    c, h, w = new_shape
+        else:
+            all_transforms = []
+
+            for level, level_hidden_channels in zip(range(self.levels), self.hidden_channels):
+                if self.squeeze_factor > 1:
+                    squeeze_transform = SqueezeTransform2D()
+                    c, h, w = squeeze_transform.get_output_shape(c, h, w)
+
+                transform_step = [create_transform_step(c, level_hidden_channels, self.actnorm, self.spline_parameters,
+                                                        self.coupling_layer_type, self.use_resnet, self.dropout_prob,
+                                                        self.num_bins, self.one_by_one_conv, self.mask_type, step, 2)
+                                  for step in range(self.steps_per_level)]
+
+                transform_pipeline = [squeeze_transform] if self.squeeze_factor > 1 else []
+                transform_pipeline.extend(transform_step)
+                transform_pipeline.append(OneByOneConvolution(c))
+                transform_level = _CompositeTransform(transform_pipeline)
+                all_transforms.append(transform_level)
+
+            all_transforms.append(ReshapeTransform(
+                input_shape=(c, h, w),
+                output_shape=(c * h * w)
+            ))
+            mct = _CompositeTransform(all_transforms)
+
+        # Inputs to the model in [0, 2 ** num_bits]
+        return mct
+
     def train(self, clear_mem=False):
         evals_without_improvement = 0
         best_model_weights = None
-        c, h, w, d = self.shape[1:]
         self.model = self.model.to(self.device)
 
         # Random batch and identity transform for reconstruction evaluation.
@@ -667,7 +834,7 @@ class NSF(BaseModel):
 
                 log_density = self.model.log_prob(batch)
 
-                loss = -nats_to_bits_per_dim(torch.mean(log_density), c, h, w, d)  # why torch.mean?
+                loss = -nats_to_bits_per_dim(torch.mean(log_density), self.shape[1:])  # why torch.mean?
                 progress_bar.set_postfix({"loss": loss})
 
                 epoch_loss.append(loss)
@@ -710,7 +877,6 @@ class NSF(BaseModel):
         return best_val_log_prob
 
     def val_eval_log_density(self, num_batches=None):
-        c, h, w, d = self.shape[1:]
         with torch.no_grad():
             total_ld = []
             batch_counter = 0
@@ -723,14 +889,13 @@ class NSF(BaseModel):
                     break
             total_ld = torch.cat(total_ld)
             self.val_log_density_list.append(torch.mean(total_ld).float().cpu())
-            total_ld = nats_to_bits_per_dim(total_ld, c, h, w, d)
+            total_ld = nats_to_bits_per_dim(total_ld, self.shape[1:])
             self.val_loss_list.append(torch.mean(total_ld).float().cpu())
             return total_ld.mean(), 2 * total_ld.std() / total_ld.shape[0]
 
     def eval_log_density(self, input):
-        assert input.dim() in [5], "Give 5 dimensional input."
+        assert input.dim() in [4, 5], "Give 4 or 5 dimensional input."
         with torch.no_grad():
-            c, h, w, d = input.shape[1:]
             input = input.to(device=self.device, dtype=torch.float32)
             log_prob = self.model.log_prob(input)
             return log_prob
@@ -742,8 +907,9 @@ class NSF(BaseModel):
         return samples
 
 class OptimizedNSF(NSF):
-    def __init__(self, _train_loader, _val_loader=None):
-        super().__init__(_train_loader, _val_loader, **nsf_params)
+    def __init__(self, _train_loader, _val_loader=None, nsf_kwargs: dict = None):
+        nsf_kwargs = optimized_nsf_params if nsf_kwargs is None else nsf_kwargs
+        super().__init__(_train_loader, _val_loader, **nsf_kwargs)
 
 
 class EmbeddingNSF(BaseModel):
@@ -869,6 +1035,6 @@ if __name__ == "__main__":
     dataset = DataSet(**data_kwargs)
     # train_loader, val_loader = get_train_val_loader(dataset, split_ratio=.9, **train_loader_kwargs)
 
-    #flow = NSF(train_loader, val_loader, **nsf_params)
+    #flow = NSF(train_loader, val_loader, **optimized_nsf_params)
     # print("device: ", flow.device)
     # flow.train()
