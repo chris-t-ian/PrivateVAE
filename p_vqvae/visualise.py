@@ -3,30 +3,9 @@ import os.path
 import matplotlib.pyplot as plt
 import numpy as np
 from torch import Tensor, get_device
-from p_vqvae.utils import calculate_AUC
+from p_vqvae.utils import calculate_AUC, get3d_middle_slices, check_and_remove_channel_dimension
 
 plt.rcParams['figure.figsize'] = [5, 3.75]
-
-
-def check_and_remove_channel_dimension(x, dim=3):
-    if dim == 3 and len(x.shape) == 5:
-        assert x.shape[1] == 1, f"input file has {x.shape[1]} channels"
-        return x[:, 0, :, :, :]
-    if dim == 2 and len(x.shape) == 4:
-        assert x.shape[1] == 1, f"input file has {x.shape[1]} channels"
-        return x[:, 0, :, :]
-    else:
-        return x
-
-
-def get3d_middle_slices(x):
-    assert len(x.shape) == 3, f"dimensions of shape are {len(x.shape)}, but need 3"
-    image_0 = np.concatenate(
-        [x[:, :, x.shape[2] // 2], np.flipud(x[:, x.shape[1] // 2, :].T)],
-        axis=1)
-    image_1 = np.concatenate(
-        [np.flipud(x[x.shape[0] // 2, :, :].T), np.zeros((x.shape[0], x.shape[2]))], axis=1)
-    return np.concatenate([image_0, image_1], axis=0)
 
 
 def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.png", dim=3):
