@@ -100,9 +100,9 @@ class BaseModel:
 
                 state_dict = new_state_dict
 
+            print(f"Loading model from {full_path}")
             self.model.load_state_dict(state_dict)
             self.trained_flag = True
-            print(f"Model loaded from {full_path}")
         else:
             print(f"Model file not found: {full_path}")
 
@@ -244,6 +244,10 @@ class MembershipClassifier(BaseModel):
             logits = self.model(_input)
 
         return logits
+
+
+class VAE(BaseModel):
+    pass
 
 
 class VQ_VAE(BaseModel):
@@ -472,6 +476,7 @@ class TransformerDecoder_VQVAE(BaseModel):
         device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         vqvae_device=None,
         device_ids: list = None,
+        input_spatial_dim: int = 3,
     ):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -485,6 +490,7 @@ class TransformerDecoder_VQVAE(BaseModel):
             self.vqvae_model = vqvae.model.to(device=vqvae_device)
 
         # Transformer hyperparameters
+        self.spatial_dim = input_spatial_dim
         self.attn_layers_dim = attn_layers_dim
         self.attn_layers_depth = attn_layers_depth
         self.attn_layers_heads = attn_layers_heads
@@ -506,13 +512,11 @@ class TransformerDecoder_VQVAE(BaseModel):
         self.seed = seed
         super().__init__(transformer_model, model_path, "transformer_VQVAE", device, device_ids, seed)
         self.optimizer = torch.optim.Adam(params=self.model.parameters(), lr=self.lr)
-        self.latent_spatial_dim = self.vqvae_model.encode_stage_2_inputs(
-            next(iter(self.train_loader)).to(device=self.vqvae_device, dtype=self.dtype)).shape[2:]
+        self.latent_spatial_dim = self.get_latent_spatial_dims()
         self.ordering = Ordering(
             ordering_type=OrderingType.RASTER_SCAN.value,
-            spatial_dims=3,
-            dimensions=(1,) + self.vqvae_model.encode_stage_2_inputs(
-                next(iter(train_loader)).to(device=self.vqvae_device, dtype=self.dtype)).shape[2:],
+            spatial_dims=self.spatial_dim,
+            dimensions=(1,) + self.latent_spatial_dim,
         )
 
     def _init_model(self):
@@ -520,7 +524,10 @@ class TransformerDecoder_VQVAE(BaseModel):
         spatial_shape = self.vqvae_model.encode_stage_2_inputs(test_scan).shape[2:]
 
         # define maximum sequence length
-        max_seq_len = spatial_shape[0] * spatial_shape[1] * spatial_shape[2]
+        if self.spatial_dim == 3:
+            max_seq_len = spatial_shape[0] * spatial_shape[1] * spatial_shape[2]
+        else:
+            max_seq_len = spatial_shape[0] * spatial_shape[1]
 
         # Beginning of sentence token + 1
         num_tokens = self.vqvae_model.num_embeddings + 1
@@ -666,6 +673,10 @@ class TransformerDecoder_VQVAE(BaseModel):
 
         generated_images = np.stack(generated_images)
         return np.expand_dims(generated_images, axis=1)
+
+    def get_latent_spatial_dims(self):
+        return self.vqvae_model.encode_stage_2_inputs(
+            next(iter(self.train_loader)).to(device=self.vqvae_device, dtype=self.dtype)).shape[2:]
 
 
 class ResidualBlock(torch.nn.Module):
