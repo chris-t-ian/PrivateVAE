@@ -4,7 +4,8 @@ import torch
 import sklearn
 
 import nibabel as nib
-from p_vqvae.utils import get3d_middle_slices, check_and_remove_channel_dimension
+from p_vqvae.utils import (get3d_middle_slice, check_and_remove_channel_dimension, downsample_image,
+                           get_2d_dataset_from_3d_dataset)
 from monai.data import DataLoader
 from monai.data import Dataset as DataSet_monai
 from monai.transforms import Compose, RandAffine, RandShiftIntensity, RandGaussianNoise, ThresholdIntensity, ToTensor
@@ -21,8 +22,7 @@ def preprocess(data: np.array, downsample_factor: int = 1, normalize: int = None
     if crop:  # crop image
         data = data[crop[0][0]:-crop[0][1], crop[1][0]:-crop[1][1], crop[2][0]:-crop[2][1]]
     if downsample_factor != 1:  # down-sample image, take every f-th element
-        f = downsample_factor
-        data = data[::f, ::f, ::f]
+        data = downsample_image(data, downsample_factor)
     if normalize:  # normalize image to range [0, normalize]
         data = (data - data.min()) / (data.max() - data.min()) * normalize
     if padding:  #
@@ -272,7 +272,7 @@ class Atlas2dDataSet(Atlas3dDataSet):
         super().__init__(**kwargs)
 
     def __load__(self):
-        cached_file_2d = os.path.join(self.cache_path, 'ATLAS_2' + self.prefix + f'_2D_{self.slice_type}.npy')
+        cached_file_2d = os.path.join(self.cache_path, 'ATLAS_2' + self.prefix + f'_2D_{self.slice_type}_ds{self.downsample_2d}.npy')
 
         if os.path.isfile(cached_file_2d) and self.cache_path:  # if file exists and cache path provided, load npy file
             data_2d = np.load(cached_file_2d, mmap_mode='r')
@@ -283,23 +283,7 @@ class Atlas2dDataSet(Atlas3dDataSet):
             else:
                 data_3d = super().__load__()
 
-            data_3d = check_and_remove_channel_dimension(data_3d, dim=3)
-            data_2d = []
-            #if self.slice_type == "axial":
-            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[1], data_3d.shape[2]), dtype=data_3d.dtype)
-            #elif self.slice_type == "coronal":
-            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[1], data_3d.shape[3]), dtype=data_3d.dtype)
-            #elif self.slice_type == "sagittal":
-            #    data_2d = np.empty((data_3d.shape[0], data_3d.shape[2], data_3d.shape[3]), dtype=data_3d.dtype)
-            #elif self
-
-            # for every image in data_3d: load slice
-            for idx in range(data_3d.shape[0]):
-                image_3d = np.copy(data_3d[idx])
-                image_2d = get3d_middle_slices(image_3d, output="axial")
-                data_2d.append(image_2d)
-
-            data_2d = np.concatenate(np.array(data_2d), axis=0)
+            data_2d = get_2d_dataset_from_3d_dataset(data_3d, self.slice_type, self.downsample_2d)
 
             if self.cache_path:
                 print(f"Storing {self.slice_type} slices as {cached_file_2d}")
@@ -350,6 +334,44 @@ class SyntheticDataSet(DataSet):
     def __load__(self):
         assert os.path.isfile(self.cached_file), f"Cached file {self.cached_file} does not exist."
         return np.load(self.cached_file, mmap_mode='r')
+
+    def __getitem__(self, idx):
+        image = np.copy(self.images[idx])
+
+        if self.transform:
+            image = self.transform(image)
+
+        if self.dtype == torch.float32 and image.dtype == torch.uint8:
+            image = uint8_to_float32(image)
+        elif self.dtype == torch.uint8 and image.dtype == torch.float32:
+            image = float32_to_uint8(image)
+
+        if self.labels is not None:
+            return {"image": image, "label": self.labels[idx]}
+        else:
+            return image
+
+
+class Synthetic2dSlicesFrom3dVolumes(DataSet):
+    def __init__(self, cached_3d_file, slice_type="axial", downsample_2d=1, labels=None, **kwargs):
+        self.cached_3d_file = cached_3d_file
+        self.cached_2d_file = cached_3d_file.replace('3D_MRI', f'2D_MRI_{slice_type}_from_syn3d')
+        self.labels = labels
+        self.slice_type = slice_type
+        self.downsample_2d = downsample_2d
+        self.images = self.__load__()
+        super().__init__(self.images, **kwargs)
+
+    def __load__(self):
+        assert os.path.isfile(self.cached_3d_file), f"Cached file {self.cached_3d_file} does not exist."
+        if os.path.isfile(self.cached_2d_file):
+            return np.load(self.cached_2d_file, mmap_mode='r')
+        else:
+            data_3d = np.load(self.cached_3d_file, mmap_mode='r')
+            print("data_3d.shape: ", data_3d.shape)
+            data_2d = get_2d_dataset_from_3d_dataset(data_3d, self.slice_type, self.downsample_2d)
+            np.save(self.cached_2d_file, data_2d)
+            return data_2d
 
     def __getitem__(self, idx):
         image = np.copy(self.images[idx])
