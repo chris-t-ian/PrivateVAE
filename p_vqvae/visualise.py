@@ -3,7 +3,7 @@ import os.path
 import matplotlib.pyplot as plt
 import numpy as np
 from torch import Tensor, get_device
-from p_vqvae.utils import calculate_AUC, get3d_middle_slices, check_and_remove_channel_dimension
+from p_vqvae.utils import calculate_AUC, get3d_middle_slice, check_and_remove_channel_dimension
 
 plt.rcParams['figure.figsize'] = [5, 3.75]
 
@@ -12,7 +12,7 @@ def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.
 
     img = check_and_remove_channel_dimension(img, dim)
     if n == 1:
-        image = get3d_middle_slices(img[0]) if dim == 3 else img[1]
+        image = get3d_middle_slice(img[0]) if dim == 3 else img[1]
         plt.imshow(image, cmap="gray")
 
     else:
@@ -20,7 +20,7 @@ def plot_generated_images(img: np.array, n=3, file="data/plots/generated_images.
         plt.style.use("default")
 
         for i in range(n):
-            image = get3d_middle_slices(img[i])
+            image = get3d_middle_slice(img[i])
             ax[i].imshow(image, cmap="gray")
             ax[i].axis("off")
             ax[i].title.set_text(f"Synthetic image {i}")
@@ -39,26 +39,26 @@ def plot_reconstructions(img: np.array, reconstructions: np.array, n=1):
     plt.style.use("default")
 
     if n==1:
-        reconstruction = get3d_middle_slices(reconstructions[0])
+        reconstruction = get3d_middle_slice(reconstructions[0])
 
         ax[0].imshow(reconstruction, cmap="gray")
         ax[0].axis("off")
         ax[0].title.set_text(f"Reconstructed image")
 
-        image = get3d_middle_slices(img[0])
+        image = get3d_middle_slice(img[0])
 
         ax[1].imshow(image, cmap="gray")
         ax[1].axis("off")
         ax[1].title.set_text(f"Real image")
     else:
         for i in range(n):
-            reconstruction = get3d_middle_slices(reconstructions[i])
+            reconstruction = get3d_middle_slice(reconstructions[i])
 
             ax[0, i].imshow(reconstruction, cmap="gray")
             ax[0, i].axis("off")
             ax[0, i].title.set_text(f"Reconstructed image {i}")
 
-            image = get3d_middle_slices(img[i])
+            image = get3d_middle_slice(img[i])
 
             ax[1, i].imshow(image, cmap="gray")
             ax[1, i].axis("off")
@@ -97,7 +97,7 @@ def plot_real_rec_syn(img: np.array, reconstructions: np.array, synthetic: np.ar
 
 
 def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, tprs3=None, fprs3=None, label3=None,
-                   low_fprs=False, save=True):
+                   low_fprs=False, save=True, file_path=None, title: str = None):
     auc = calculate_AUC(tprs, fprs)
     if label:
         plt.plot(fprs, tprs, label=f'{label} (AUC = {auc:.3f})')
@@ -126,7 +126,9 @@ def show_roc_curve(tprs, fprs, label=None, tprs2=None, fprs2=None, label2=None, 
         plt.ylim(1e-3, 1.0)
 
     plt.subplots_adjust(left=0.2, bottom=0.2)
-    file_path = f"data/plots/ROC_{label}_{label2}_{label3}_lowfprs{low_fprs}.png"
+    file_path = f"data/plots/ROC_{label}_{label2}_{label3}_lowfprs{low_fprs}.png" if file_path is None else file_path
+    if title:
+        plt.title(title)
     plt.grid()
     if save:
         print("saving plot as ", file_path)
