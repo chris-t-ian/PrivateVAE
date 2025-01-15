@@ -108,18 +108,23 @@ class BaseModel:
 
 
 class MembershipClassifierModule(torch.nn.Module):
-    def __init__(self, input_dims, num_classes, hidden_channels):
+    def __init__(self, num_classes, hidden_channels, spatial_dim=3):
         super(MembershipClassifierModule, self).__init__()
 
-        self.input_dims = input_dims
-        print("input dims: ", self.input_dims)
         self.hidden_channels = hidden_channels
 
-        self.conv1 = torch.nn.Conv3d(1, hidden_channels[0], kernel_size=3, stride=1, padding=1)
-        self.conv2 = torch.nn.Conv3d(hidden_channels[0], hidden_channels[1], kernel_size=3, stride=1, padding=1)
-        self.conv3 = torch.nn.Conv3d(hidden_channels[1], hidden_channels[2], kernel_size=3, stride=1, padding=1)
-
-        self.pool = torch.nn.MaxPool3d(kernel_size=2, stride=2)
+        if spatial_dim == 3:
+            self.conv1 = torch.nn.Conv3d(1, hidden_channels[0], kernel_size=3, stride=1, padding=1)
+            self.conv2 = torch.nn.Conv3d(hidden_channels[0], hidden_channels[1], kernel_size=3, stride=1, padding=1)
+            self.conv3 = torch.nn.Conv3d(hidden_channels[1], hidden_channels[2], kernel_size=3, stride=1, padding=1)
+            self.pool = torch.nn.MaxPool3d(kernel_size=2, stride=2)
+        elif spatial_dim == 2:
+            self.conv1 = torch.nn.Conv2d(1, hidden_channels[0], kernel_size=3, stride=1, padding=1)
+            self.conv2 = torch.nn.Conv2d(hidden_channels[0], hidden_channels[1], kernel_size=3, stride=1, padding=1)
+            self.conv3 = torch.nn.Conv2d(hidden_channels[1], hidden_channels[2], kernel_size=3, stride=1, padding=1)
+            self.pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+        else:
+            raise NotImplementedError
 
         self.fc1 = None
         self.fc2 = torch.nn.Linear(128, num_classes)
@@ -131,7 +136,12 @@ class MembershipClassifierModule(torch.nn.Module):
         x = self.pool(torch.relu(self.conv2(x)))  # Second 3D Conv layer
         x = self.pool(torch.relu(self.conv3(x)))  # Third 3D Conv layer
 
-        flattened_dim = x.shape[1] * x.shape[2] * x.shape[3] * x.shape[4]  # Correct flattened size
+        if self.spatial_dim == 3:
+            flattened_dim = x.shape[1] * x.shape[2] * x.shape[3] * x.shape[4]  # Correct flattened size
+        elif self.spatial_dim == 2:
+            flattened_dim = x.shape[1] * x.shape[2] * x.shape[3]
+        else:
+            raise NotImplementedError
 
         # Initialize fc1 if it hasn't been initialized yet
         if self.fc1 is None:
@@ -159,6 +169,10 @@ class MembershipClassifier(BaseModel):
     ):
         self.train_loader = train_loader
         self.shape = next(iter(self.train_loader))['image'].shape
+        print("self.shape: ", self.shape)
+        self.spatial_dim = len(self.shape) - 2
+        assert self.spatial_dim in [2, 3], f"Spatial dimension must be 2 or 3 but given {self.spatial_dim}"
+
         self.val_loader = val_loader
         self.channels = channels
         self.n_epochs = epochs
@@ -172,7 +186,7 @@ class MembershipClassifier(BaseModel):
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
 
     def _init_model(self):
-        return MembershipClassifierModule(self.shape[2:], num_classes=2, hidden_channels=self.channels)
+        return MembershipClassifierModule(num_classes=2, hidden_channels=self.channels, spatial_dim=self.spatial_dim)
 
     def train(self):
         best_val_loss = float("inf")
