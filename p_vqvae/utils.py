@@ -1,6 +1,6 @@
 import hashlib
 import numpy as np
-
+import pandas as pd
 
 def downsample_image(image: np.ndarray, factor):
     f = factor
@@ -73,9 +73,14 @@ def get_2d_dataset_from_3d_dataset(x_3d, slice_type="axial", downsampling_factor
     return data_2d
 
 
-def select_tpr_at_low_fprs(tprs, fprs, low_fpr: int = 0.01):
-    return tprs[np.argmax(np.array(fprs) <= low_fpr)] if np.any(np.array(fprs) <= low_fpr) else tprs[-1]
+def select_tpr_at_low_fprs(tprs, fprs, low_fpr: int = 0.01, reverse_order=True):
+    _tprs = tprs.copy()
+    _fprs = fprs.copy()
+    if reverse_order:
+        _tprs.reverse()
+        _fprs.reverse()
 
+    return _tprs[np.argmax(np.array(_fprs) <= low_fpr)] if np.any(np.array(_fprs) <= low_fpr) else _tprs[-1]
 
 def subset_to_sha256_key(subset, len_set=956, len_key=8):
     """Create a unique compact hashed key for a subset of IDs ranging from 0 to len."""
@@ -93,3 +98,13 @@ def subset_to_sha256_key(subset, len_set=956, len_key=8):
 
 def calculate_AUC(tprs, fprs):
     return np.abs(np.trapz(tprs, x=fprs))
+
+
+def get_auc_and_tpr_summary(df: pd.DataFrame):
+    return pd.DataFrame({
+        'mean_auc': df['auc'].mean(),
+        'std_auc': df['auc'].std(),
+        'mean_tpr_at_low_fpr': df['tpr_at_low_fpr'].mean(),
+        'std_tpr_at_low_fpr': df['tpr_at_low_fpr'].std(),
+        'low_fpr': df['low_fpr'].mean()
+    }, index=[0])
