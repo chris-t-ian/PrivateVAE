@@ -191,7 +191,7 @@ class Challenger:
             challenger_ids = self.challenger_ids.copy()          # create a copy of ids so that it can be changed
             non_challenger_ids = self.non_challenger_ids.copy()  # without changing the class attribute self. _ids
 
-            for b in target_memberships:
+            for it, b in enumerate(target_memberships):
                 if b == 1:
                     target_id = random.sample(challenger_ids, 1)[0]
                     challenger_ids.remove(target_id)  # remove from list to avoid drawing the same target again
@@ -201,6 +201,14 @@ class Challenger:
 
                 target_ids.append(target_id)
 
+                if len(challenger_ids) == 0:
+                    target_ids.extend(random.sample(non_challenger_ids, self.n_targets - it - 1))
+                    target_memberships[it + 1:] = [0 for _ in range(self.n_targets - it)]
+                    print("target memberships (should only be zeros at the end: ", target_memberships)
+                    break
+
+            assert len(target_ids) == self.n_targets, (f"target_ids has len {len(target_ids)}, but it should have len "
+                                                       f"{self.n_targets}")
             assert len(target_ids) == len(set(target_ids)), "target_ids does have non-unique ids."
 
         return target_ids, target_memberships
@@ -356,6 +364,7 @@ class AdversaryDOMIAS:
             data_type = None,
             downsample_2d = 1,     # only needed for 2d data
             slice_type = "axial",  # only needed for 2d data
+            n_targets = None,
     ):
         # self.synthetic_train_loader = get_train_loader(_challenger.challenger_syn_dataset, **nsf_train_loader_kwargs)
         self.challenger = _challenger
@@ -363,6 +372,7 @@ class AdversaryDOMIAS:
         self.data_type = _challenger.data_type if data_type is None else data_type
         self.challenger_data_type = _challenger.data_type
         self.downsample_2d = downsample_2d
+        self.n_targets = _challenger.n_targets if n_targets is None else n_targets
         self.slice_type = slice_type
         self.nsf_train_loader_kwargs = nsf_train_loader_kwargs
         self.seed = _challenger.data_seed
@@ -383,6 +393,7 @@ class AdversaryDOMIAS:
         assert not bool(set(self.adversary_ids) & set(self.non_adversary_ids)), \
             (f"adversary_ids and non_adversary_ids overlap with "
              f"{len(set(self.adversary_ids) & set(self.non_adversary_ids))} elements")
+        self.knowledge_overlap = self.get_empirical_overlap()  # overlap between adversary_ids and challenger_ids in %
 
         self.auxiliary_ds = self.get_adversary_raw_dataset(**data_kwargs)
         self.auxiliary_ds_val = self.get_adversary_raw_dataset_val(**data_kwargs)
@@ -428,8 +439,10 @@ class AdversaryDOMIAS:
         if self.background_knowledge == 1.0:
             adversary_ids = challenger_ids[:self.n_a] if self.n_a < len(challenger_ids) else challenger_ids
         elif self.background_knowledge == 0.5:
-            adversary_ids = random.sample(challenger_ids, self.n_a // 2)
-            adversary_ids.extend(random.sample(non_challenger_ids, self.n_a // 2))
+            n_challenger_ids = min(self.n_a // 2, len(challenger_ids))
+            n_non_challenger_ids = self.n_a - n_challenger_ids
+            adversary_ids = random.sample(challenger_ids, n_challenger_ids)
+            adversary_ids.extend(random.sample(non_challenger_ids, n_non_challenger_ids))
         elif self.background_knowledge == 0.0:
             adversary_ids = non_challenger_ids[:self.n_a] if self.n_a < len(non_challenger_ids) else non_challenger_ids
         else:
@@ -501,11 +514,14 @@ class AdversaryDOMIAS:
             data_type = self.challenger_data_type.replace("_MRI", "_") + self.data_type
 
         if type == "raw":
+            # print("sha challenger_ids for NSF raw saving: ", subset_to_sha256_key(self.challenger_ids, self.challenger.n_distribution + 1, 4))
+            # print("sha adversary_ids for NSF raw saving: ", subset_to_sha256_key(self.adversary_ids, self.challenger.n_distribution + 1, 4))
             return {"adv": "DOMIAS", "": data_type, "raw": "", "n_a": self.n_a,
                     "lr": self.nsf_kwargs["learning_rate"], "epochs": self.nsf_kwargs["epochs"],
                     "es": self.nsf_kwargs["early_stopping"],
-                    "sha": f"{subset_to_sha256_key(self.challenger_ids, self.challenger.n_distribution + 1, 4)}"}
+                    "sha": f"{subset_to_sha256_key(self.adversary_ids, self.challenger.n_distribution + 1, 4)}"}
         else:
+            #print("sha challenger ids for NSF syn saving: ", subset_to_sha256_key(self.challenger_ids, self.challenger.n_distribution + 1, 4))
             return {"adv": "DOMIAS", "": data_type, "syn": "", "m_c": self.m_c,
                     "lr": self.nsf_kwargs["learning_rate"], "epochs": self.nsf_kwargs["epochs"],
                     "es": self.nsf_kwargs["early_stopping"],
@@ -519,7 +535,7 @@ class AdversaryDOMIAS:
 
     def sample_nsf(self, n):
         nsf_raw = OptimizedNSF(self.adversary_train_loader, self.adversary_val_loader, self.nsf_kwargs)
-        raw_saving_keys = {"adversary": "DOMIAS", "raw": "", "sha": f"{subset_to_sha256_key(self.adversary_ids)}"}
+        raw_saving_keys = self.get_nsf_saving_keys("raw")
         if nsf_raw.model_exists(**raw_saving_keys):
             nsf_raw.load(**raw_saving_keys)
         else:
@@ -527,7 +543,7 @@ class AdversaryDOMIAS:
             nsf_raw.save(**raw_saving_keys)
 
         nsf_syn = OptimizedNSF(self.synthetic_train_loader, self.synthetic_val_loader, self.nsf_kwargs)
-        syn_saving_keys = {"adversary": "DOMIAS", "syn": "", "sha": f"{subset_to_sha256_key(self.challenger_ids)}"}
+        syn_saving_keys = self.get_nsf_saving_keys("syn")
 
         if nsf_syn.model_exists(**syn_saving_keys):
             nsf_syn.load(**syn_saving_keys)
@@ -627,6 +643,10 @@ class AdversaryDOMIAS:
             return AdversaryAtlas2dDataset(self.non_adversary_ids, **kwargs)
         elif self.data_type == "digits":
             return AdversaryDigitsDataSet(self.non_adversary_ids, **kwargs)
+
+
+    def get_empirical_overlap(self):
+        return len(set(self.adversary_ids) & set(self.challenger_ids)) / len(self.challenger_ids)
 
 
 class AdversaryLOGAN(AdversaryDOMIAS):
@@ -1019,7 +1039,7 @@ class AdversaryLiRAClassifier(AdversaryLiRA):
     def predict(self, model, loss=True):
         """Get un-normalized features a.k.a. logits (i.e., the outputs of the model’s last layer before the softmax
         function)"""
-        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augment_flag=False, num_workers=1)
+        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augmentation=None, num_workers=1)
         logits = []
         for img in loader:
             logits.append(model.logits(img))
@@ -1058,7 +1078,7 @@ class AdversaryLiRANSF(AdversaryLiRA):
         return nsf
 
     def predict(self, model):
-        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augment_flag=False, num_workers=1)
+        loader = get_train_loader(self.synthetic_images_challenger, batch_size=1, augmentation=None, num_workers=1)
         log_p_s = []
         for batch in loader:
             # print("img.shape: ", img.shape)
