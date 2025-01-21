@@ -71,6 +71,31 @@ def get_augmentation():
     return transforms
 
 
+def get_augmentation_noise(std=0.02):
+    transforms = Compose([
+        RandGaussianNoise(
+            prob=1.0,
+            mean=0.0,
+            std=std
+        ),
+
+        ThresholdIntensity(
+            threshold=0.0,  # Min value
+            above=True,  # Values above the threshold will be set to 0
+            cval=0.0,  # Clipping value
+        ),
+        ThresholdIntensity(
+            threshold=1.0,  # Max value
+            above=False,  # Values above the threshold will be set to 1
+            cval=1.0  # Clipping value
+        ),
+
+        ToTensor()
+
+    ])
+    return transforms
+
+
 def load_batches(loader, n_batches):
     """Return n_batches of batches given loader."""
     ii = 0
@@ -393,12 +418,12 @@ class Synthetic2dSlicesFrom3dVolumes(DataSet):
 def get_train_val_loader(
         dataset,
         batch_size: int = 8,
-        augment_flag=True,
+        augmentation=get_augmentation(),
         split_ratio: float = 0.875,
         num_workers=8,
         ):
 
-    transform = get_augmentation() if augment_flag else ToTensor()
+    transform = ToTensor() if augmentation is None else augmentation
 
     if split_ratio == 1.0:
         dataset.transform = transform
@@ -422,10 +447,10 @@ def get_train_val_loader(
 def get_train_loader(
     dataset,
     batch_size: int = 8,
-    augment_flag=True,
+    augmentation=get_augmentation(),
     num_workers=8,
 ):
-    transform = get_augmentation() if augment_flag else ToTensor()
+    transform = ToTensor() if augmentation is None else augmentation
     dataset.transform = transform
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
