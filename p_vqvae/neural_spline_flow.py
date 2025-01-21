@@ -293,18 +293,17 @@ class SqueezeTransform2D(Transform):
 
     def inverse(self, inputs, context=None):
         if inputs.dim() != 4:
-            raise ValueError('Expecting inputs with 5 dimensions')
+            raise ValueError('Expecting inputs with 4 dimensions')
 
         batch_size, c, h, w = inputs.size()
 
-        if c % (self.factor ** 2) != 0:
-            raise ValueError(f'Invalid number of channel dimensions: {c}. '
-                             f'It must be divisible by {self.factor ** 2}.')
+        if c < 4 or c % 4 != 0:
+            raise ValueError('Invalid number of channel dimensions.')
 
-        inputs = inputs.view(batch_size, c // self.factor ** 2, self.factor, self.factor, self.factor, h, w)
-        inputs = inputs.permute(0, 1, 5, 2, 3, 4).contiguous()
+        inputs = inputs.view(batch_size, c // self.factor ** 2, self.factor, self.factor, h, w)
+        inputs = inputs.permute(0, 1, 4, 2, 5, 3).contiguous()
         inputs = inputs.view(batch_size, c // self.factor ** 2, h * self.factor, w * self.factor)
-        print("inputs shape after inverse squeezing: ", inputs.shape)
+
         return inputs, torch.zeros(batch_size)
 
 
@@ -443,8 +442,8 @@ class OneByOneConvolution(LULinear):
         self.permutation = RandomPermutation(num_channels, dim=1)
 
     def _lu_forward_inverse(self, inputs, inverse=False):
-        #print("len input shape: ", len(inputs.shape))
-        if len(inputs.shape) == 5:
+        len_input_shape = len(inputs.shape)
+        if len_input_shape == 5:
             b, c, h, w, d = inputs.shape
             inputs = inputs.permute(0, 2, 3, 4, 1).reshape(b * h * w * d, c)
         else:
@@ -456,7 +455,7 @@ class OneByOneConvolution(LULinear):
         else:
             outputs, logabsdet = super().forward(inputs)
 
-        if len(inputs.shape) == 5:
+        if len_input_shape == 5:
             outputs = outputs.reshape(b, h, w, d, c).permute(0, 4, 1, 2, 3)
             logabsdet = logabsdet.reshape(b, h, w, d)
         else:
@@ -624,7 +623,7 @@ class NSF(BaseModel):
         self.train_loader = _train_loader
         self.val_loader = _val_loader
         self.shape = self.get_shape()
-        print("self.shape: ", self.shape)
+        print("Input shape to base model: ", self.shape)
         self.spatial_dim = len(self.shape) - 2
         assert self.spatial_dim in [2, 3], f"This NSF only accepts 2 or 3 spatial dimensions but got {self.spatial_dim}"
 
