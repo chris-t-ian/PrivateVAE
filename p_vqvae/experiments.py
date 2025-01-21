@@ -9,22 +9,23 @@ from sklearn.metrics import auc
 from p_vqvae.mia import Challenger, AdversaryDOMIAS, AdversaryZCalibratedDOMIAS, AdversaryZCalibratedDOMIAS2, \
     AdversaryLiRANSF, AdversaryLiRAClassifier, AdversaryLOGAN, MultiSeedAdversaryDOMIAS
 from p_vqvae.visualise import show_roc_curve, plot_generated_images, plot_reconstructions, show_roc_curve_std, \
-                               show_auc_tpr_plot
+                               show_auc_tpr_plot, plot_diffs, plot_loss_distributions_domias, show_log_p_r
 from p_vqvae.networks import train_transformer_and_vqvae
-from p_vqvae.dataloader import get_train_loader, get_train_val_loader, Atlas3dDataSet
+from p_vqvae.dataloader import *
 from p_vqvae.neural_spline_flow import OptimizedNSF
-from p_vqvae.utils import select_tpr_at_low_fprs
+from p_vqvae.utils import select_tpr_at_low_fprs, get_auc_and_tpr_summary
 
+from PrivateVAE.p_vqvae.dataloader import get_augmentation, get_augmentation_noise
 # don't forget to clear model outputs folder before implementing
 # also check kwargs before implementation
 TEST_MODE = True  # turn off for real attack
 
 include_targets_in_reference_dataset = None  # either True, False or None (=included at random)
 
-device = "cuda:4"
+device = "cuda:5"
 mpl.rcParams['axes.labelsize'] = 17
-plt.xticks(fontsize=15)
-plt.yticks(fontsize=15)
+plt.xticks(fontsize=10)
+plt.yticks(fontsize=10)
 n_atlas = 955
 n_digits = 1796
 low_fpr = 0.001
@@ -56,17 +57,17 @@ raw_data_kwargs = {
 }
 vqvae_train_loader_kwargs = {
     "batch_size": 4,  #
-    "augment_flag": False,
+    "augmentation": get_augmentation(),
     "num_workers": 1
 }
 nsf_train_loader_kwargs = {
     "batch_size": 4,  #
-    "augment_flag": False,
+    "augmentation": get_augmentation(),
     "num_workers": 1
 }
 shadow_model_train_loader_kwargs = {
     "batch_size": 2,
-    "augment_flag": False,
+    "augmentation": get_augmentation(),
     "num_workers": 1
 }
 vqvae_kwargs = {
@@ -180,12 +181,12 @@ def show_synthetic_images():
     syn = t_vqvae.create_synthetic_images(2)
     plot_generated_images(syn, 1, "data/plots/syn_image.png")
 
-def show_nsf_samples():
-    _adversary = AdversaryDOMIAS(challenger_standard_mri, raw_data_kwargs, nsf_train_loader_kwargs, background_knowledge=1.0,
-                                 nsf_kwargs=nsf_kwargs_mri)
+def show_nsf_samples(file_name="data/plots/NSF_raw_samples.png", **kwargs):
+    _adversary = domias(return_adversary=True, **kwargs)
     raw_samples, syn_samples = _adversary.sample_nsf(2)
-    plot_generated_images(raw_samples, 2, "data/plots/NSF_raw_samples.png")
-    plot_generated_images(syn_samples, 2, "data/plots/NSF_syn_samples.png")
+    dim = 2 if "2D" in kwargs["data_type_adversary"] else 3
+    plot_generated_images(raw_samples, 2, file_name, dim=dim)
+    plot_generated_images(syn_samples, 2, file_name.replace("raw", "syn"), dim=dim)
 
 def plot_learning_curve_vqvae_and_transformer():
     seed = 10
@@ -244,6 +245,7 @@ def plot_learning_curves_nsf(data_type="raw"):
 
     fig, ax = plt.subplots(nrows=1, ncols=1)
     fig.set_size_inches(6, 6)
+    plt.subplots_adjust(left=0.2, bottom=0.2)  # avoid cutting off x and y-labels
     ax.plot(train_log_density, color="blue", label="Training log density")
     ax.plot(val_log_density, color="red", label="Validation log density")
     ax.set_ylabel("log p")
@@ -255,81 +257,9 @@ def plot_learning_curves_nsf(data_type="raw"):
     plt.clf()
 
 
-def plot_loss_distributions_domias(combine=True):
-    _adversary = AdversaryDOMIAS(challenger_standard_mri, raw_data_kwargs, nsf_train_loader_kwargs, background_knowledge=1.0,
-                                 nsf_kwargs=nsf_kwargs_mri)
-    log_p_s_members = []
-    log_p_r_members = []
-    log_p_s_nonmembers = []
-    log_p_r_nonmembers = []
-    for it, b in enumerate(_adversary.true_memberships):
-        if b == 1:
-            log_p_s_members.append(_adversary.log_p_s[it])
-            log_p_r_members.append(_adversary.log_p_r[it])
-        else:
-            log_p_s_nonmembers.append(_adversary.log_p_s[it])
-            log_p_r_nonmembers.append(_adversary.log_p_r[it])
-
-    fig, ax = plt.subplots(nrows=2, ncols=2)
-    fig.set_size_inches(16, 9)
-    ax[0, 0].hist(log_p_s_members, color='blue', label='syn loss members', alpha=0.5, bins=50)
-    ax[0, 0].hist(log_p_r_members, color='red', label='raw loss members', alpha=0.5, bins=50)
-    ax[0, 0].legend(loc="upper left")
-
-    ax[0, 1].hist(log_p_s_nonmembers, color='blue', label='syn loss non-members', alpha=0.5, bins=50)
-    ax[0, 1].hist(log_p_r_nonmembers, color='red', label='raw loss non-members', alpha=0.5, bins=50)
-    ax[0, 1].legend(loc="upper left")
-
-    ax[1, 0].hist(log_p_s_members, color='blue', label='syn loss members', alpha=0.5, bins=50)
-    ax[1, 0].hist(log_p_s_nonmembers, color='red', label='syn loss non members', alpha=0.5, bins=50)
-    ax[1, 0].legend(loc="upper right")
-
-    ax[1, 1].hist(log_p_r_members, color='blue', label='raw loss members', alpha=0.5, bins=50)
-    ax[1, 1].hist(log_p_r_nonmembers, color='red', label='raw loss nonmembers', alpha=0.5, bins=50)
-    ax[0, 1].legend(loc="upper right")
-    plt.xlabel("log p")
-    plt.tight_layout()
-    plt.savefig("data/plots/loss_distribution_DOMIAS.png")
-
-    if combine:
-        plt.figure(figsize=(12, 8))
-        plt.hist(log_p_s_members, color='blue', label='syn loss members', alpha=0.4, bins=85)
-        plt.hist(log_p_s_nonmembers, color='tab:cyan', label='syn loss non-members', alpha=0.4, bins=85)
-        plt.hist(log_p_r_members, color='tab:orange', label='raw loss members', alpha=0.4, bins=85)
-        plt.hist(log_p_r_nonmembers, color='tab:red', label='raw loss non-members', alpha=0.4, bins=85)
-        plt.legend()
-        plt.xlabel("log p")
-        plt.tight_layout()
-        plt.savefig("data/plots/loss_distribution_DOMIAS_combined.png")
-
-
-def plot_diffs(_adversary=None, title: str = None):
-    if _adversary is None:
-        _adversary = AdversaryDOMIAS(challenger_standard_mri, raw_data_kwargs, nsf_train_loader_kwargs,
-                                     background_knowledge=1.0, nsf_kwargs=nsf_kwargs_mri)
-    diffs_members = []
-    diffs_non_members = []
-    diffs = np.array(_adversary.diffs)
-    diffs = (diffs - diffs.min())/(diffs.max() - diffs.min())
-    for it, b in enumerate(_adversary.true_memberships):
-        if b == 1:
-            diffs_members.append(diffs[it])
-        else:
-            diffs_non_members.append(diffs[it])
-
-    plt.figure(figsize=(8, 5))
-    plt.hist(diffs_members, color='blue', label='Members', alpha=0.5, bins=75)
-    plt.hist(diffs_non_members, color='red', label='Non-members', alpha=0.5, bins=75)
-    plt.legend()
-    plt.xlabel("log p_S - log p_R")
-    if title is not None:
-        plt.title(title)
-    plt.tight_layout()
-    plt.savefig("data/plots/loss_differences_DOMIAS.png")
-    plt.clf()
-
 def domias(data_type_challenger="3D_MRI", data_type_adversary="3D_MRI", challenger_seed=0, adversary_knowledge = 1.0,
-           outlier_percentile=None, n_targets=None, plot_roc=False):
+           outlier_percentile=None, n_targets=None, n_a=None, epochs_nsf=None, plot_log_p_r=False, plot_roc=False,
+           return_adversary=False):
     if "digits" in data_type_challenger:
         _challenger_kwargs = challenger_kwargs_digits.copy()
         _adversary_kwargs = adversary_kwargs_digits.copy()
@@ -343,6 +273,10 @@ def domias(data_type_challenger="3D_MRI", data_type_adversary="3D_MRI", challeng
     _adversary_kwargs["background_knowledge"] = adversary_knowledge
     _adversary_kwargs["outlier_percentile"] = outlier_percentile
     _challenger_kwargs["n_targets"] = n_targets if n_targets is not None else _challenger_kwargs["n_targets"]
+    _nsf_kwargs["early_stopping"] = float('inf') if epochs_nsf is not None else _nsf_kwargs["early_stopping"]
+    _nsf_kwargs["epochs"] = epochs_nsf if epochs_nsf is not None else _nsf_kwargs["epochs"]
+    #   if noise_std is not None:
+    #        _target_loader_kwargs["augmentation"] = get_augmentation_noise(noise_std)
 
     challenger = Challenger(
         **_challenger_kwargs,
@@ -354,20 +288,34 @@ def domias(data_type_challenger="3D_MRI", data_type_adversary="3D_MRI", challeng
         challenger_seed=challenger_seed,
     )
 
-    _adversary = AdversaryDOMIAS(challenger, raw_data_kwargs, _nsf_train_loader_kwargs, nsf_kwargs=_nsf_kwargs,
+    _adversary = AdversaryDOMIAS(challenger, raw_data_kwargs, _nsf_train_loader_kwargs, nsf_kwargs=_nsf_kwargs, n_a=n_a,
                                  data_type=data_type_adversary, **_adversary_kwargs)
     tprs, fprs = _adversary.tprs, _adversary.fprs
+    overlap = _adversary.knowledge_overlap
+    print("adversary knowledge overlap: ", overlap)
 
     if plot_roc:
         data_type = data_type_challenger if data_type_challenger == data_type_adversary else data_type_challenger.replace("_MRI", "_") + data_type_adversary
         file_path = (f"data/plots/ROC_DOMIAS_{data_type}_knowledge{_adversary_kwargs['background_knowledge']}"
                      f"_outlier{_adversary_kwargs['outlier_percentile']}")
-        title = f"ROC curve for {data_type}"
-        show_roc_curve(tprs, fprs, f"DOMIAS_{data_type}", file_path=file_path + ".png", title=title)
-        show_roc_curve(tprs, fprs, f"DOMIAS_{data_type}", low_fprs=True, file_path=file_path + "lowfprs.png", title=title)
+        if "3D" in data_type_challenger and "3D" in data_type_adversary:
+            title = "3D Attack on 3D Synthetic Data"
+        elif "3D" in data_type_challenger and "2D" in data_type_adversary:
+            title = "2D Attack on 3D Synthetic Data"
+        else:
+            title = data_type
+        show_roc_curve(tprs, fprs, file_path=file_path + ".png", title=title)
+        show_roc_curve(tprs, fprs, log_scale=True, file_path=file_path + "log_scale.png", title=title)
 
-    return {"tprs": tprs, "fprs": fprs, "auc": auc(fprs, tprs),
-            "tpr_at_low_fpr": select_tpr_at_low_fprs(tprs, fprs, low_fpr), "low_fpr": low_fpr}
+    if plot_log_p_r:
+        file_path = f"data/plots/log_p_r_hist_knowl{adversary_knowledge}_na{n_a}_ntargets{n_targets}.png"
+        show_log_p_r(_adversary, title=f"Knowledge = {adversary_knowledge}", file_path=file_path)
+
+    if return_adversary:
+        return _adversary
+    else:
+        return {"tprs": [tprs], "fprs": [fprs], "auc": auc(fprs, tprs),
+                "tpr_at_low_fpr": select_tpr_at_low_fprs(tprs, fprs, low_fpr), "low_fpr": low_fpr, "overlap": overlap}
 
 
 def domias_digits(adversary_knowledge=1.0, plot_roc=True, outlier_percentile=None, seed=0):
@@ -386,7 +334,7 @@ def domias_digits(adversary_knowledge=1.0, plot_roc=True, outlier_percentile=Non
 
     if plot_roc:
         show_roc_curve(tprs, fprs, f"DOMIAS Digits")
-        show_roc_curve(tprs, fprs, f"DOMIAS Digits", low_fprs=True)
+        show_roc_curve(tprs, fprs, f"DOMIAS Digits", log_scale=True)
     return tprs, fprs, _adversary.log_p_s, _adversary.log_p_r, _adversary.true_memberships
 
 
@@ -404,6 +352,70 @@ def digits_show_synthetic_images():
     t_vqvae = challenger.target_model
     syn = t_vqvae.create_synthetic_images(2)
     plot_generated_images(syn, 1, "data/plots/syn_image_digits1.png", dim=2)
+
+
+def domias_vary_knowledge(show_auc=True, show_roc=True, n_a_mode="all", **kwargs):
+    knowlegde_list = [1.0, 0.5, 0.0]
+    n_a = n_atlas - challenger_kwargs_mri["n_c"] if n_a_mode == "all" else challenger_kwargs_mri["n_c"]  # if n_a  is not big enough fill the rest (extend) with non challenger ids
+    df = pd.DataFrame(columns=['knowledge', 'auc', 'tpr_at_low_fpr', 'low_fpr', 'overlap', 'tprs', 'fprs'])
+
+    for knowlegde in knowlegde_list:
+        res = domias(adversary_knowledge = knowlegde, n_a=n_a, **kwargs)
+        df_res = pd.DataFrame(res)
+        df_res = df_res.head(1) # take first row
+        df_res['knowledge'] = knowlegde
+        df = pd.concat([df, df_res[['knowledge', 'auc', 'tpr_at_low_fpr', 'low_fpr', 'overlap', 'tprs', 'fprs']]])
+
+
+    if show_auc:
+        filename = f"data/plots/vary_knowledge_auc_n_a_{n_a_mode}.png"
+        show_auc_tpr_plot(df['overlap'], df['auc'], xlabel="Adversary knowledge", ylabel="AUC", file_name=filename)
+        filename = f"data/plots/vary_knowledge_tpr_at_low_fpr_n_a_{n_a_mode}.png"
+        show_auc_tpr_plot(df['overlap'], df['tpr_at_low_fpr'], xlabel="Adversary knowledge",
+                          ylabel=f"TPR at {low_fpr} FPR", file_name=filename)
+
+    if show_roc:
+        show_roc_curve(df.iloc[0]['tprs'], df.iloc[0]['fprs'], label=f"Overlap = {df.iloc[0]['overlap']}",
+                       tprs2=df.iloc[1]['tprs'], fprs2=df.iloc[1]['fprs'], label2=f"Overlap = {df.iloc[1]['overlap']}",
+                       tprs3=df.iloc[2]['tprs'], fprs3=df.iloc[2]['fprs'], label3=f"Overlap = {df.iloc[2]['overlap']}",
+                       file_path=f"data/plots/vary_knowledge_ROC_n_a_{n_a_mode}.png")
+        show_roc_curve(df.iloc[0]['tprs'], df.iloc[0]['fprs'], label=f"Overlap = {df.iloc[0]['overlap']}",
+                       tprs2=df.iloc[1]['tprs'], fprs2=df.iloc[1]['fprs'], label2=f"Overlap = {df.iloc[1]['overlap']}",
+                       tprs3=df.iloc[2]['tprs'], fprs3=df.iloc[2]['fprs'], label3=f"Overlap = {df.iloc[2]['overlap']}",
+                       file_path=f"data/plots/vary_knowledge_ROC_n_a_{n_a_mode}_log.png", log_scale=True)
+
+    df = df.drop(columns=['tprs', 'fprs'])
+    latex_table = df.to_latex(index=False, float_format="{:.4f}".format)
+    with open(os.path.join(results_path, f"vary_knowledge_n_a_{n_a_mode}_{now}.txt"), "w") as file:
+        file.write(latex_table)
+
+def domias_exagerate_nsf_overfitting(show_roc=True, **kwargs):
+    epoch_list = [None, 200, 400]
+    n_a = challenger_kwargs_mri["n_c"]
+    df = pd.DataFrame(columns=['epochs', 'auc', 'tpr_at_low_fpr', 'low_fpr', 'tprs', 'fprs'])
+
+    for epoch in epoch_list:
+        res = domias(epochs_nsf=epoch, adversary_knowledge = 0.0, n_a=n_a, **kwargs)
+        df_res = pd.DataFrame(res)
+        df_res = df_res.head(1) # take first row
+        df_res['epochs'] = epoch if epoch is not None else "Early Stopping"
+        df = pd.concat([df, df_res[['epochs', 'auc', 'tpr_at_low_fpr', 'low_fpr', 'tprs', 'fprs']]])
+
+    if show_roc:
+        show_roc_curve(df.iloc[0]['tprs'], df.iloc[0]['fprs'], label=f"{df.iloc[0]['epochs']}",
+                       tprs2=df.iloc[1]['tprs'], fprs2=df.iloc[1]['fprs'], label2=f"Epochs = {df.iloc[1]['epochs']}",
+                       tprs3=df.iloc[2]['tprs'], fprs3=df.iloc[2]['fprs'], label3=f"Epochs = {df.iloc[2]['epochs']}",
+                       file_path=f"data/plots/exagerate_NSFepochs_ROC.png")
+        show_roc_curve(df.iloc[0]['tprs'], df.iloc[0]['fprs'], label=f"{df.iloc[0]['epochs']}",
+                       tprs2=df.iloc[1]['tprs'], fprs2=df.iloc[1]['fprs'], label2=f"Epochs = {df.iloc[1]['epochs']}",
+                       tprs3=df.iloc[2]['tprs'], fprs3=df.iloc[2]['fprs'], label3=f"Epochs = {df.iloc[2]['epochs']}",
+                       file_path=f"data/plots/exagerate_NSFepochs_ROC_log.png", log_scale=True)
+
+
+def domias_craft_noisy_outliers(show_auc=True):
+    gaussian_noise_std = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0]
+    for std in gaussian_noise_std:
+        pass
 
 
 def domias_multiseed(n_seeds=4, _challenger_kwargs: dict = None, _adversary_kwargs: dict = None, _vqvae_kwargs: dict =None,
@@ -480,8 +492,8 @@ def domias_multiseed(n_seeds=4, _challenger_kwargs: dict = None, _adversary_kwar
     auc_std = np.std(np.array(auc_list), axis=0)
 
     if show_roc:
-        show_roc_curve_std(tprs=tprs_mean, fprs=fprs_mean, std1=tprs_std, label=f"DOMIAS {data_type}", low_fprs=False)
-        show_roc_curve_std(tprs=tprs_mean, fprs=fprs_mean, std1=tprs_std, label=f"DOMIAS {data_type}", low_fprs=True)
+        show_roc_curve_std(tprs=tprs_mean, fprs=fprs_mean, std1=tprs_std, label=f"DOMIAS {data_type}", log_scale=False)
+        show_roc_curve_std(tprs=tprs_mean, fprs=fprs_mean, std1=tprs_std, label=f"DOMIAS {data_type}", log_scale=True)
     if show_mia_score_hist:
         plot_diffs(adversary, title=f"{data_type} data")
 
@@ -499,12 +511,12 @@ def domias_multi_target_seeds(n_target_seeds=10, **kwargs):
     return df
 
 
-def domias_outlier_3d_to_2d(n_target_seeds=10, show_auc=True):
-    percentiles = [1.0, .25, .1, .02]
+def domias_outlier_3d_to_2d(n_target_seeds=10, adjust_n_targets=True ,show_auc=True):
+    percentiles = [1.0, .75, .5, .25, .1]
     df = pd.DataFrame(columns=['mean_auc', 'std_auc', 'mean_tpr_at_low_fpr', 'std_tpr_at_low_fpr', 'low_fpr'])
 
     for percentile in percentiles:
-        n_targets = int(np.ceil(percentiles[-1] * n_atlas / percentile))
+        n_targets = int(np.ceil(percentiles[-1] * n_atlas / percentile)) if adjust_n_targets else None
         percentile = None if percentile == 1.0 else percentile
         df_res = domias_multi_target_seeds(
             n_target_seeds=n_target_seeds,
@@ -515,22 +527,19 @@ def domias_outlier_3d_to_2d(n_target_seeds=10, show_auc=True):
             outlier_percentile=percentile,
             n_targets=n_targets,
         )
-        df_summary = pd.DataFrame({
-            'mean_auc': df_res['auc'].mean(),
-            'std_auc': df_res['auc'].std(),
-            'mean_tpr_at_low_fpr': df_res['tpr_at_low_fpr'].mean(),
-            'std_tpr_at_low_fpr': df_res['tpr_at_low_fpr'].std(),
-            'low_fpr': df_res['low_fpr'].mean()
-        }, index=[0])
-        df = pd.concat([df, df_summary])
+        df = pd.concat([df, get_auc_and_tpr_summary(df_res)])
 
-    latex_table = df.to_latex(index=False, float_format="{:.2f}".format)
-    with open(os.path.join(results_path + f"outlier_3d_to_2d_{now}.txt", "w")) as file:
+    latex_table = df.to_latex(index=False, float_format="{:.4f}".format)
+    with open(os.path.join(results_path, f"outlier_3d_to_2d_{n_target_seeds}seeds_adjustTargets{adjust_n_targets}"
+                                         f"{now}.txt"), "w") as file:
         file.write(latex_table)
 
     if show_auc:
-        show_auc_tpr_plot(percentiles, df['mean_auc'], df['std_auc'], xlabel="Outlier percentile", ylabel="AUC")
-        show_auc_tpr_plot(percentiles, df['mean_tpr_at_low_fpr'], df['std_tpr_at_low_fpr'], xlabel="Percentile", ylabel=f"TPR at {low_fpr} FPR")
+        file_name = f"data/plots/outlier_percentile_auc_adjustTargets{adjust_n_targets}.png"
+        show_auc_tpr_plot(percentiles, df['mean_auc'], df['std_auc'], xlabel="Outlier percentile", ylabel="AUC", file_name=file_name)
+        file_name = f"data/plots/outlier_percentile_mean_tpr_at_low_fpr_adjustTargets{adjust_n_targets}.png"
+        show_auc_tpr_plot(percentiles, df['mean_tpr_at_low_fpr'], df['std_tpr_at_low_fpr'], xlabel="Outlier Percentile",
+                          ylabel=f"TPR at {low_fpr} FPR", file_name=file_name)
 
 
 def domias_outlier(adversary_knowledge=1.0, plot_roc=False, challenger=challenger_standard_mri):
@@ -550,7 +559,7 @@ def domias_outlier(adversary_knowledge=1.0, plot_roc=False, challenger=challenge
         show_roc_curve(tprs_all, fprs_all, f"All targets", tprs_25, fprs_25, f"25th percentile outliers", tprs_10,
                        fprs_10, f"10th percentile outliers")
         show_roc_curve(tprs_all, fprs_all, f"All targets", tprs_25, fprs_25, f"25th percentile outliers", tprs_10,
-                       fprs_10, f"10th percentile outliers", low_fprs=True)
+                       fprs_10, f"10th percentile outliers", log_scale=True)
     return tprs_10, fprs_10
 
 
@@ -595,7 +604,7 @@ def domias_overfitting(n_seeds=4, show_roc=True, show_aucs=True):
     #    show_roc_curve_std(res[0]["tprs_mean"], res[0]["fprs_mean"], f"early stopping", tprs_list[1], fprs_list[1], f"100 epochs",
     #                   tprs_list[2], fprs_list[2], f"200 epochs")
     #    show_roc_curve_std(tprs_list[0], fprs_list[0], f"early stopping", tprs_list[1], fprs_list[1], f"100 epochs",
-    #                   tprs_list[2], fprs_list[2], f"200 epochs", low_fprs=True)
+    #                   tprs_list[2], fprs_list[2], f"200 epochs", log_scale=True)
     if show_aucs:
         show_auc_tpr_plot([65, 100, 200], mean_auc, std_auc, xlabel="epoch", ylabel="AUC")
         show_auc_tpr_plot([65, 100, 200], mean_tpr_lf, std_tpr_lf, xlabel="epoch", ylabel=f"TPR at {low_fpr} FPR")
@@ -650,15 +659,15 @@ def logan(adversary_knowledge=1.0, plot_roc=False):
     tprs, fprs = _adversary.tprs, _adversary.fprs
 
     if plot_roc:
-        show_roc_curve(tprs, fprs, f"LOGAN, knowledge: {adversary_knowledge}")
-        show_roc_curve(tprs, fprs, f"LOGAN, knowledge: {adversary_knowledge}", low_fprs=True)
+        show_roc_curve(tprs, fprs, f"knowledge: {adversary_knowledge}")
+        show_roc_curve(tprs, fprs, f"knowledge: {adversary_knowledge}", log_scale=True)
     return tprs, fprs
 
 
 def domias_with_augmentation(adversary_knowledge=0.0, plot_roc=False):
     _nsf_train_loader_kwargs = {
         "batch_size": 4,
-        "augment_flag": True,
+        "augmentation:": get_augmentation(),
         "num_workers": 1
     }
     _adversary = AdversaryDOMIAS(challenger_standard_mri, raw_data_kwargs, _nsf_train_loader_kwargs, adversary_knowledge,
@@ -690,22 +699,11 @@ def zdomias_p_s_z(adversary_knowledge=1.0, n_z=100, plot_roc=False):
     return tprs, fprs
 
 
-def domias_vary_knowledge():
-    pass
-    #tprs_1, fprs_1 = multiple_challenger_seeds(n=4, adversary_knowledge=1.0)
-    #tprs_2, fprs_2 = multiple_challenger_seeds(n=4, adversary_knowledge=0.5)
-    #tprs_3, fprs_3 = multiple_challenger_seeds(n=4, adversary_knowledge=0.0)
-    #show_roc_curve(tprs_1, fprs_1, f"100% knowledge", tprs_2, fprs_2, f"50% knowledge", tprs_3,
-    #               fprs_3, f"0% knowledge", )
-    #show_roc_curve(tprs_1, fprs_1, f"100% knowledge", tprs_2, fprs_2, f"50% knowledge", tprs_3,
-    #               fprs_3, f"0% knowledge", low_fprs=True)
-
-
 #def zdomias_vs_domias():
 #    tprs2, fprs2 = zdomias_p_r_z(1.0, n_z=50)
 #    tprs1, fprs1, _, _, _ = domias(1.0)
 #    show_roc_curve(tprs1, fprs1, f"DOMIAS", tprs2, fprs2, f"z-DOMIAS")
-#    show_roc_curve(tprs1, fprs1, f"DOMIAS", tprs2, fprs2, f"z-DOMIAS", low_fprs=True)
+#    show_roc_curve(tprs1, fprs1, f"DOMIAS", tprs2, fprs2, f"z-DOMIAS", log_scale=True)
 
 
 #def zdomias_vary_z():
@@ -715,7 +713,7 @@ def domias_vary_knowledge():
 #    show_roc_curve(tprs1, fprs1, f"z-DOMIAS, n_Z=20", tprs2, fprs2, f"z-DOMIAS, n_Z=50", tprs3, fprs3,
 #                   f"z-DOMIAS, n_Z=100")
 #    show_roc_curve(tprs1, fprs1, f"z-DOMIAS, n_Z=20", tprs2, fprs2, f"z-DOMIAS, n_Z=50", tprs3, fprs3,
-#                   f"z-DOMIAS, n_Z=100", low_fprs=True)
+#                   f"z-DOMIAS, n_Z=100", log_scale=True)
 
 
 def zdomias_vary_knowledge():
@@ -725,7 +723,7 @@ def zdomias_vary_knowledge():
     show_roc_curve(tprs_1, fprs_1, f"100% adversary knowledge", tprs_2, fprs_2, f"50% adversary knowledge", tprs_3,
                    fprs_3, f"0% adversary knowledge")
     show_roc_curve(tprs_1, fprs_1, f"100% adversary knowledge", tprs_2, fprs_2, f"50% adversary knowledge", tprs_3,
-                   fprs_3, f"0% adversary knowledge", low_fprs=True)
+                   fprs_3, f"0% adversary knowledge", log_scale=True)
 
 
 def zdomias_repeat():
@@ -768,7 +766,7 @@ def LIRA_classifier(data_type="digits", adversary_knowledge=1.0, outlier_percent
 
     if plot_roc:
         show_roc_curve(tprs, fprs, f"DOMIAS Digits")
-        show_roc_curve(tprs, fprs, f"DOMIAS Digits", low_fprs=True)
+        show_roc_curve(tprs, fprs, f"DOMIAS Digits", log_scale=True)
     return tprs, fprs, _adversary.log_p_s, _adversary.log_p_r, _adversary.true_memberships
 
 #def LIRA_NSF(plot_roc=True):
@@ -802,4 +800,4 @@ if __name__ == "__main__":
     plot_diffs()
     domias(1.0, plot_roc=True)
     domias_vary_knowledge()
-    zdomias_vs_domias()
+    #zdomias_vs_domias()
