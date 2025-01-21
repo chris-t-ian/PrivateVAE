@@ -1,38 +1,29 @@
-
 from p_vqvae.experiments import *
-#import torchvision.datasets as datasets
-#import torchvision.transforms as transforms
+import matplotlib
 
 # Define the location to store the dataset
 dataset_path = "./mnist_data"
-
-import matplotlib
 matplotlib.use('Agg')
 
 if __name__ == "__main__":
-    #show_synthetic_images()
-    # show_nsf_samples()
-    #plot_loss_distributions_domias(combine=True)
-    #plot_diffs()
-    #logan(1.0, plot_roc=True)
-    #domias(1.0, plot_roc=True)
-    #domias_outlier(1.0, plot_roc=True)
-    #domias_vary_knowledge()
-    #zdomias_vs_domias()
-    #show_raw_image()
-    #train_and_sample(2)  # this experiment: actnorm activated
-    #show_synthetic_images()
-    #multiple_challenger_seeds(n=4, adversary_knowledge=1.0, show_roc=True, show_mia_score_hist=True)  # this experiment: actnorm activated
-    #domias_multi_seed_outlier(1.0)  # is the
-    #domias_vary_knowledge()
-    #plot_learning_curves_nsf()
-    #plot_learning_curve_vqvae_and_transformer()
-    #plot_learning_curve_vqvae_and_transformer()
-    #show_synthetic_images()
-    # mnist_train = datasets.MNIST(root=dataset_path, train=True, transform=transforms.ToTensor(), download=True)
-    #domias_multiseed(n=4, show_roc=True, show_mia_score_hist=True)
-    #domias_overfitting()
+    from sklearn import datasets
 
-    domias_digits(plot_roc=True)
+    # general attack evaluation
+    #domias(challenger_seed=0, data_type_challenger="3D_MRI", data_type_adversary="2D_MRI", plot_roc=True)  # Fig 6
+    #domias(challenger_seed=0, data_type_challenger="3D_MRI", data_type_adversary="3D_MRI", plot_roc=True)  # Fig 6
 
+    # vary knowledge of adversary
+    #domias_vary_knowledge(n_a_mode="n_c", challenger_seed=0, data_type_challenger="3D_MRI", data_type_adversary="2D_MRI", show_auc=True, plot_log_p_r=True) # Fig 7
+    #domias_vary_knowledge(n_a_mode="all" ,challenger_seed=0, data_type_challenger="3D_MRI", data_type_adversary="2D_MRI", show_auc=True) # Fig 7
 
+    # exagerate NSF overfitting to test hypothesis about overfitting of NSF
+    # Try only increasing overfitting of raw NSF
+    domias_exagerate_nsf_overfitting(show_auc=True, challenger_seed=0, data_type_challenger="3D_MRI", data_type_adversary="2D_MRI")
+
+    # check outliers
+    domias_outlier_3d_to_2d(n_target_seeds=100, adjust_n_targets=True, show_auc=True)
+    #domias_outlier_3d_to_2d(n_target_seeds=2, adjust_n_targets=False, show_auc=True)  # fig 5?
+
+    # show NSF samples, if they both look shitty increase epochs_nsf to 200 or 400
+    show_nsf_samples(file_name="data/plots/NSF_raw_sample_3D.png", data_type_challenger="3D_MRI", data_type_adversary="3D_MRI")
+    show_nsf_samples(file_name="data/plots/NSF_raw_sample_2D.png", data_type_challenger="3D_MRI", data_type_adversary="2D_MRI")
